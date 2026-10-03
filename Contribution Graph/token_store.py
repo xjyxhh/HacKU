@@ -280,6 +280,38 @@ class TokenStore:
     def graph(self):
         return self._ledger.graph()
 
+    def contracts_payload(self) -> list[dict]:
+        """JSON-ready list of commission contracts for the API layer."""
+        return [
+            {
+                "id": contract.id,
+                "taskId": contract.task_id,
+                "principalId": contract.principal_id,
+                "contractorId": contract.contractor_id,
+                "valueType": contract.value_type.value,
+                "contractPrice": float(contract.contract_price),
+                "maximumMintValue": float(contract.maximum_mint_value),
+                "status": contract.status.value,
+                "evidenceHashes": list(contract.evidence_hashes),
+                "approverIds": list(contract.approver_ids),
+                "verifiedMintValue": (float(contract.verified_mint_value)
+                                      if contract.verified_mint_value is not None else None),
+            }
+            for contract in self._ledger.contracts.values()
+        ]
+
+    def graph_payload(self) -> dict:
+        """JSON-ready SourceCred-style graph projection for the API layer."""
+        graph = self._ledger.graph()
+        return {
+            "nodes": [{"address": list(node.address), "kind": node.kind, "label": node.label}
+                      for node in graph.nodes],
+            "edges": [{"address": list(edge.address), "kind": edge.kind,
+                       "source": list(edge.source), "destination": list(edge.destination),
+                       "amount": float(edge.amount) if edge.amount is not None else None}
+                      for edge in graph.edges],
+        }
+
     def ledger_payload(self) -> dict:
         """JSON-ready snapshot of events, balances, and budgets for the API layer."""
         events = [
