@@ -7,7 +7,7 @@
 - A 已提供项目、成员、任务、贡献的数据模型，JSON 本地保存，以及 `CORE`、`SUPPORT`、`REVIEW`、`COORDINATION` 四类贡献的评分规则。
 - 新贡献由 `ContributionStore.submit_contribution(...)` 创建，初始状态为 `PENDING`。`PENDING` 和 `DISPUTED` 得分为 0；`VERIFIED` 和 `RESOLVED` 按当前最终值计分。
 - `ContributionStore.contribution_data(contribution_id)` 提供单条贡献及证据、验证、争议记录，供 B 使用；`dashboard_data(project_id)` 提供项目、成员、任务、贡献及帮助关系，供 C 使用。
-- 当前只有 Python 方法和命令行入口，没有 HTTP API 或网页服务。若 B、C 实现网页界面，需先约定由谁提供调用这些方法的服务接口，并保持所有界面读写同一个数据文件。不要在前端重写评分公式。
+- 当前已有 FastAPI 服务：C 的只读页面调用 `GET /api/dashboard`，B 可通过贡献详情、证据、验证与争议等 HTTP 接口操作同一份 JSON 数据文件。接口及启动方式见 `Contribution Graph/README.md`。不要在前端重写评分公式。
 - `Contribution Graph/data.json` 目前仅含 2 名成员、1 项任务和 1 条待验证贡献。完整的 4 人流程由 `demo_workflow.py` 生成；联调时应使用一份固定的 4 人演示数据文件，并约定其路径与重置方式。
 
 ## B：证据、同伴验证与争议处理

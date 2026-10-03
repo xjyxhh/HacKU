@@ -1,6 +1,6 @@
 # Contribution Graph：完整数据流程
 
-本文件夹包含本地 JSON 数据保存、贡献评分、验证与争议处理，以及供 Dashboard / Graph 使用的数据输出。只需 Python 3，无需安装额外依赖。命令不指定 `--db` 时使用本文件夹的 `data.json`。以下命令均在本文件夹中运行：
+本文件夹包含本地 JSON 数据保存、贡献评分、验证与争议处理，以及供 Dashboard / Graph 使用的数据输出。命令行数据工具只需 Python 3；网页服务使用 FastAPI。数据工具不指定 `--db` 时使用本文件夹的 `data.json`，网页服务默认使用 `demo.json`。以下命令均在本文件夹中运行：
 
 ```sh
 cd 'Contribution Graph'
@@ -34,11 +34,12 @@ python3 contribution_store.py --db demo.json record c4
 首次运行时，在本文件夹生成固定的四人演示数据，并启动本地只读页面：
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 seed_dashboard.py
 python3 dashboard_server.py
 ```
 
-浏览器打开 `http://127.0.0.1:8000`。页面显示项目总览、任务价值、成员总分与四类明细、贡献占比、帮助关系图和贡献状态。演示文件 `demo.json` 包含 4 名成员、4 项任务、5 条贡献，以及 `PENDING`、`VERIFIED`、`DISPUTED`、`RESOLVED` 四种状态。`seed_dashboard.py` 不会覆盖已有文件；需要重置演示数据时，先将旧文件移走或删除，再运行脚本。
+浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。页面显示项目总览、任务价值、成员总分与四类明细、贡献占比、帮助关系图和贡献状态。演示文件 `demo.json` 包含 4 名成员、4 项任务、5 条贡献，以及 `PENDING`、`VERIFIED`、`DISPUTED`、`RESOLVED` 四种状态。`seed_dashboard.py` 不会覆盖已有文件；需要重置演示数据时，先将旧文件移走或删除，再运行脚本。
 
 页面每次点击“刷新数据”都会重新读取同一个 JSON 文件。如果 B 用命令行或自己的界面修改贡献，请确保也使用 `--db demo.json`；例如确认 Charlie 的待验证贡献：
 
@@ -46,7 +47,30 @@ python3 dashboard_server.py
 python3 contribution_store.py --db demo.json review c3 alice CONFIRM
 ```
 
-刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。若 B/C 使用其他数据文件，可用 `python3 dashboard_server.py --db /path/to/shared.json` 启动页面。接口为 `GET /api/dashboard`，直接返回 `ContributionStore.dashboard_data("fintech")` 的结果；当前页面只读，B 的验证与争议操作仍由 B 负责。
+刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。若 B/C 使用其他数据文件，可用 `python3 dashboard_server.py --db /path/to/shared.json` 启动页面。现有页面仍为只读，但 FastAPI 已提供写入接口供 B 的界面调用：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/dashboard` | 读取 `fintech` 项目的 Dashboard 数据 |
+| GET | `/api/projects/{project_id}/dashboard` | 读取指定项目数据 |
+| GET | `/api/contributions/{contribution_id}` | 读取贡献详情、证据和处理记录 |
+| POST | `/api/projects` | 创建项目 |
+| POST | `/api/projects/{project_id}/members` | 添加成员 |
+| POST | `/api/projects/{project_id}/tasks` | 添加任务 |
+| POST | `/api/projects/{project_id}/contributions` | 提交贡献 |
+| POST | `/api/contributions/{contribution_id}/evidence` | 添加证据 |
+| POST | `/api/contributions/{contribution_id}/reviews` | 确认、调整或提出争议 |
+| POST | `/api/contributions/{contribution_id}/resolve` | 解决争议 |
+
+POST 请求使用 JSON 请求体，字段名称与 `contribution_store.py` 中相应方法一致；具体字段和枚举值可在 `/docs` 查看。例如确认一条待验证贡献：
+
+```sh
+curl -X POST http://127.0.0.1:8000/api/contributions/c3/reviews \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer_id":"alice","decision":"CONFIRM"}'
+```
+
+服务默认仅监听本机。当前接口使用请求中的成员 ID，尚无登录身份验证；若要开放给外部用户，需先加入认证，并将 JSON 存储改为支持多进程事务的数据库。
 
 ## 手动操作全套流程
 
