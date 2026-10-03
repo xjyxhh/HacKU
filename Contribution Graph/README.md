@@ -56,6 +56,7 @@ python3 contribution_store.py review c3 alice CONFIRM
 | GET | `/api/projects` | 列出可切换的项目 |
 | GET | `/api/dashboard` | 读取 `fintech` 项目的 Dashboard 数据 |
 | GET | `/api/projects/{project_id}/dashboard` | 读取指定项目数据 |
+| GET | `/api/projects/{project_id}/token-view` | 只读 Token 投影（阶段一，见 [融合指南](../融合指南.md)） |
 | GET | `/api/contributions/{contribution_id}` | 读取贡献详情、证据和处理记录 |
 | POST | `/api/projects` | 创建项目 |
 | POST | `/api/projects/{project_id}/members` | 添加成员 |
@@ -167,7 +168,16 @@ python3 contribution_store.py --db walkthrough.sqlite3 record c2
 python3 contribution_store.py --db walkthrough.sqlite3 dashboard fintech
 ```
 
-输出为 JSON，包含 `project`、`members`、`tasks`、`contributions` 和 `relationships`。成员包含 `totalScore`、`contributionShare` 和四类 `breakdown`；关系中包含贡献者、受帮助成员、任务、类型、状态和当前得分。`PENDING` 与 `DISPUTED` 的当前得分为 0。C 可直接调用 `ContributionStore("walkthrough.sqlite3").dashboard_data("fintech")` 获取相同结构，无需重复计算分数。
+输出为 JSON，包含 `project`、`members`、`tasks`、`contributions` 和 `relationships`。成员包含 `totalScore`、`contributionShare` 和四类 `breakdown`；关系中包含贡献者、受帮助成员、任务、类型、状态和当前得分。`PENDING` 与 `DISPUTED` 的当前得分为 0。C 可直接调用 `ContributionStore("walkthrough.sqlite3").dashboard_data("fintech")` 获取相同结构，无需重复计算分数。自阶段一起，Dashboard 输出还额外带有 `balances` 字段（Token 投影，追加字段，旧字段不变）。
+
+### 5. Token 引擎只读投影（阶段一）
+
+```sh
+python3 contribution_store.py --db walkthrough.sqlite3 token-view fintech
+python3 token_projection_demo.py --db walkthrough.sqlite3
+```
+
+把既有贡献只读投影成 Token 账本，输出 `balances`、`contracts`、`events`、`graph`、`skipped` 和 `assumptions`，不写库、不改表。投影规则、融合陷阱与后续路线见 [融合指南.md](../融合指南.md)。
 
 ## 检查
 

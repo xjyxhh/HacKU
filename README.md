@@ -39,11 +39,27 @@ python3 -m venv .venv
 | `Contribution Graph/contribution_store.py` | SQLite 读写、业务流程与命令行 |
 | `Contribution Graph/dashboard_server.py` | FastAPI 接口与静态页面服务 |
 | `Contribution Graph/dashboard/` | 看板（`index.html`、`app.js`、`style.css`）与审核页面（`review.html`、`review.js`、`review.css`） |
+| `Contribution Graph/token_engine.py` | Token 账本、委托结算与关系图投影（新引擎，尚未接入主流程） |
+| `Contribution Graph/token_projection_demo.py` | 旧分数与 Token 余额的对照脚本 |
 | `Contribution Graph/schema.sql` | 数据库表、外键和索引 |
 | `Contribution Graph/data.json` | 合并后的项目数据快照 |
 | `Contribution Graph/import_json.py`、`export_json.py`、`merge_sqlite.py` | 快照导入、导出与历史数据库合并工具 |
+| `融合指南.md` | 新旧引擎的概念映射、融合陷阱与路线图 |
 
 目前快照含 1 个项目、4 名成员、4 项任务、6 条贡献，以及对应的核验和争议记录。运行时以 `data.sqlite3` 为准；更改数据后，运行 `python3 export_json.py` 更新快照。命令行用法、API 路径和完整流程见 [详细文档](Contribution%20Graph/README.md)，审核页面的实现与验收步骤见 [B-实现说明.md](B-实现说明.md)。
+
+## 新旧引擎融合（阶段一）
+
+团队正在把旧的贡献计分模型迁移到 `token_engine.py` 的 Token 账本模型。阶段一已完成**只读投影**：不写库、不改表，就能在同一份既有数据上同时看到旧分数与 Token 余额。
+
+```sh
+cd 'Contribution Graph'
+.venv/bin/python token_projection_demo.py                # 对照报告（临时库）
+.venv/bin/python token_projection_demo.py --db data.sqlite3
+.venv/bin/python contribution_store.py token-view fintech # 投影 JSON
+```
+
+服务启动后也可读取 `GET /api/projects/{project_id}/token-view`；`GET /api/dashboard` 的成员数据额外带 `balances`。融合的完整映射规则、陷阱与后续路线见 [融合指南.md](融合指南.md)。
 
 ## 测试与开发
 
@@ -54,4 +70,4 @@ python3 -m venv .venv
 .venv/bin/python demo_workflow.py
 ```
 
-前者运行 38 项自动化测试，覆盖评分引擎、SQLite 持久化、数据合并与导入、Dashboard 与审核 API；后者在临时数据库中验证完整贡献流程，不修改网站数据。贡献规范见 [AGENTS.md](AGENTS.md)，历次变更见 [CHANGELOG.md](CHANGELOG.md)。
+前者运行 57 项自动化测试，覆盖评分引擎、SQLite 持久化、数据合并与导入、Dashboard 与审核 API、Token 账本及只读投影；后者在临时数据库中验证完整贡献流程，不修改网站数据。贡献规范见 [AGENTS.md](AGENTS.md)，历次变更见 [CHANGELOG.md](CHANGELOG.md)。

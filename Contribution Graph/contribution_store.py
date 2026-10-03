@@ -26,6 +26,25 @@ from contribution_engine import (
     score_members,
     validate_contribution,
 )
+from token_engine import (
+    ContractStatus,
+    LedgerEventType,
+    TokenLedger,
+    TokenProject,
+    TokenTask,
+    ValueType,
+)
+
+
+ZERO = Decimal("0")
+
+# Legacy contribution types that describe produced value. SUPPORT is not a value
+# type: in the token model it is commissioned production (see 融合指南.md).
+TOKEN_VALUE_TYPES = {
+    ContributionType.CORE: ValueType.CORE,
+    ContributionType.REVIEW: ValueType.REVIEW,
+    ContributionType.COORDINATION: ValueType.COORDINATION,
+}
 
 
 def _json_default(value):
@@ -309,6 +328,8 @@ class ContributionStore:
             ],
             "contributions": records,
             "relationships": relationships,
+            # Additive stage-1 token projection; legacy fields above are unchanged.
+            "balances": self.token_view(project_id)["balances"],
         }
 
     def contribution_data(self, contribution_id):
@@ -354,6 +375,171 @@ class ContributionStore:
         if any(not value.is_finite() for value in changes.values()):
             raise ValueError("numeric values must be finite")
         return changes
+
+    # --- Stage 1: read-only projection of stored contributions into the token model ---
+    # This never writes to SQLite. It exists so the legacy scores and the token
+    # balances can be compared on the same data before any migration. See 融合指南.md.
+    TOKEN_PROJECTION_ASSUMPTIONS = (
+        "只投影 VERIFIED / RESOLVED 的贡献；PENDING / DISPUTED 不计分，列入 skipped。",
+        "direct：CORE / REVIEW / COORDINATION 的旧得分直接作为铸币量，铸给贡献者。",
+        "commissioned：SUPPORT 视为委托生产，principal = helped_member，contractor = contributor，合约价格 = 旧得分。",
+        "阶段一没有单独记录被委托成果的价值，因此取 verifiedMintValue = contractPrice，即铸 P 给 principal、再转 P 给 contractor。",
+        "任务 mintCap 取 max(task_value, 该任务本次投影的铸币总量)，使重述既有数据不会被上限拒绝；上限的真正约束留到阶段二。",
+        "treasury 是投影合成的地址 <project_id>-treasury，旧数据没有金库概念。",
+        "证据幂等键使用 legacy:<contribution_id>，阶段一不做证据级去重。",
+    )
+
+    def token_view(self, project_id):
+        """Project stored contributions into the token model without changing any data."""
+        project = self._project(project_id)
+        items = [item for item in self.contributions.values() if item.project_id == project_id]
+        scores = score_members(project, self.members, self.tasks, items)
+
+        planned = []
+        skipped = []
+        mint_totals = {task_id: ZERO for task_id in project.task_ids}
+        for item in items:
+            amount = contribution_score(item, project, self.members, self.tasks)
+            if item.status not in (ContributionStatus.VERIFIED, ContributionStatus.RESOLVED):
+                skipped.append(self._token_skip(item, f"状态 {item.status.value} 暂不计分"))
+                continue
+            if amount <= ZERO:
+                skipped.append(self._token_skip(item, "有效得分为 0，无法铸币"))
+                continue
+            if item.type == ContributionType.SUPPORT:
+                if item.helped_member_id is None:
+                    skipped.append(self._token_skip(item, "SUPPORT 缺少受帮助成员，无法构成委托合约"))
+                    continue
+                planned.append((item, "COMMISSION", amount))
+            else:
+                planned.append((item, "DIRECT", amount))
+            mint_totals[item.task_id] += amount
+
+        ledger = TokenLedger(TokenProject(
+            project.id, project.name, f"{project.id}-treasury", tuple(project.member_ids),
+        ))
+        for task_id in project.task_ids:
+            task = self.tasks[task_id]
+            ledger.add_task(TokenTask(
+                task.id, project.id, task.name, self._token_value_type(items, task_id),
+                max(task.task_value, mint_totals[task_id]),
+                task.description.strip() or task.name,
+            ))
+
+        for item, kind, amount in planned:
+            try:
+                if kind == "DIRECT":
+                    ledger.mint_direct(f"{item.id}:mint", item.task_id, item.contributor_id, amount,
+                                       [f"legacy:{item.id}"])
+                else:
+                    self._project_commission(ledger, item, amount)
+            except ValueError as error:
+                ledger.contracts.pop(f"{item.id}:commission", None)
+                skipped.append(self._token_skip(item, str(error)))
+
+        return self._token_view_payload(project, ledger, scores, skipped)
+
+    @staticmethod
+    def _token_skip(contribution, reason):
+        return {
+            "contributionId": contribution.id,
+            "contributorId": contribution.contributor_id,
+            "type": contribution.type.value,
+            "status": contribution.status.value,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def _token_value_type(items, task_id):
+        for item in items:
+            if item.task_id == task_id and item.type in TOKEN_VALUE_TYPES:
+                return TOKEN_VALUE_TYPES[item.type]
+        return ValueType.CORE
+
+    @staticmethod
+    def _project_commission(ledger, contribution, amount):
+        """Replay one legacy SUPPORT contribution as a settled commission contract."""
+        contract_id = f"{contribution.id}:commission"
+        principal, contractor = contribution.helped_member_id, contribution.contributor_id
+        key = [f"legacy:{contribution.id}"]
+        ledger.create_commission(contract_id, contribution.task_id, principal, contractor, amount, amount)
+        for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED, ContractStatus.CREDIT_RESERVED,
+                       ContractStatus.DELIVERED, ContractStatus.VERIFIED):
+            ledger.advance_contract(contract_id, status)
+        approvers = [member_id for member_id in ledger.project.member_ids
+                     if member_id not in (principal, contractor)]
+        ledger.settle_commission(contract_id, amount, key, approvers[:1])
+
+    def _token_view_payload(self, project, ledger, scores, skipped):
+        minted = {member_id: ZERO for member_id in project.member_ids}
+        paid = {member_id: ZERO for member_id in project.member_ids}
+        received = {member_id: ZERO for member_id in project.member_ids}
+        for event in ledger.events:
+            if event.kind == LedgerEventType.MINT:
+                minted[event.destination_id] += event.amount
+            elif event.kind == LedgerEventType.TRANSFER:
+                paid[event.source_id] += event.amount
+                received[event.destination_id] += event.amount
+        graph = ledger.graph()
+        return {
+            "project": {"id": project.id, "name": project.name,
+                        "treasuryId": ledger.project.treasury_id},
+            "assumptions": list(self.TOKEN_PROJECTION_ASSUMPTIONS),
+            "oldScores": [{
+                "memberId": member_id,
+                "totalScore": float(scores[member_id].total_score),
+                "contributionShare": float(scores[member_id].contribution_share),
+                "breakdown": {kind.value: float(value) for kind, value in scores[member_id].breakdown.items()},
+            } for member_id in project.member_ids],
+            "balances": [{
+                "memberId": member_id,
+                "name": self.members[member_id].name,
+                "minted": float(minted[member_id]),
+                "paid": float(paid[member_id]),
+                "received": float(received[member_id]),
+                "balance": float(ledger.balance(member_id)),
+            } for member_id in project.member_ids],
+            "totalSupply": float(ledger.total_supply()),
+            "oldTeamTotal": float(sum((scores[member_id].total_score for member_id in project.member_ids), ZERO)),
+            "tasks": [{
+                "id": task_id,
+                "name": self.tasks[task_id].name,
+                "valueType": ledger.tasks[task_id].value_type.value,
+                "mintCap": float(ledger.tasks[task_id].mint_cap),
+                "budget": {key: float(value) for key, value in ledger.task_budget(task_id).items()},
+            } for task_id in project.task_ids],
+            "contracts": [{
+                "id": item.id,
+                "taskId": item.task_id,
+                "principalId": item.principal_id,
+                "contractorId": item.contractor_id,
+                "contractPrice": float(item.contract_price),
+                "maximumMintValue": float(item.maximum_mint_value),
+                "status": item.status.value,
+                "verifiedMintValue": (float(item.verified_mint_value)
+                                      if item.verified_mint_value is not None else None),
+            } for item in ledger.contracts.values()],
+            "events": [{
+                "sequence": item.sequence,
+                "id": item.id,
+                "kind": item.kind.value,
+                "amount": float(item.amount),
+                "sourceId": item.source_id,
+                "destinationId": item.destination_id,
+                "taskId": item.task_id,
+                "contractId": item.contract_id,
+                "note": item.note,
+            } for item in ledger.events],
+            "graph": {
+                "nodes": [{"address": list(node.address), "kind": node.kind, "label": node.label}
+                          for node in graph.nodes],
+                "edges": [{"address": list(edge.address), "kind": edge.kind,
+                           "source": list(edge.source), "destination": list(edge.destination),
+                           "amount": float(edge.amount) if edge.amount is not None else None}
+                          for edge in graph.edges],
+            },
+            "skipped": skipped,
+        }
 
     def _contribution(self, contribution_id):
         try:
@@ -421,6 +607,8 @@ def main():
     scores.add_argument("project_id")
     dashboard = commands.add_parser("dashboard")
     dashboard.add_argument("project_id")
+    token_view = commands.add_parser("token-view")
+    token_view.add_argument("project_id")
     record = commands.add_parser("record")
     record.add_argument("contribution_id")
     args = parser.parse_args()
@@ -447,6 +635,8 @@ def main():
                                            args.completion, args.support_value, args.quality)
         elif args.command == "dashboard":
             result = store.dashboard_data(args.project_id)
+        elif args.command == "token-view":
+            result = store.token_view(args.project_id)
         elif args.command == "record":
             result = store.contribution_data(args.contribution_id)
         else:

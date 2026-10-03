@@ -1,5 +1,14 @@
 # 修改日志
 
+## 2026-10-03 · 阶段一：Token 引擎只读投影
+
+- 新增 `ContributionStore.token_view(project_id)`：把既有贡献数据只读投影成 Token 账本（余额、委托合约、账本事件、关系图），不写库、不改表。
+- 投影规则：`CORE`/`REVIEW`/`COORDINATION` 的旧得分作为直接铸币；`SUPPORT` 还原为委托合约（委托人 = 受帮助成员，执行人 = 贡献者）；`PENDING`/`DISPUTED` 与无法结算的记录列入 `skipped`。
+- `dashboard_data()` 追加 `balances` 字段（旧字段全部保留）；新增只读接口 `GET /api/projects/{project_id}/token-view` 与命令行 `token-view`。
+- 新增 `token_projection_demo.py`，在同一份数据上对照旧分数与新余额，并检查 `sum(balance) == totalSupply == oldTeamTotal`。
+- 新增 `test_token_view.py`（8 项）：守恒、只读、SUPPORT 合约映射、跳过规则、2 人项目降级、Dashboard 字段与 API。
+- 新增 [融合指南.md](融合指南.md)，记录概念映射、融合陷阱、已知代码缺口与后续三阶段路线。全量测试 57 项通过。
+
 ## 2026-10-03 · 看板录入、贡献审核与分支合并
 
 - 看板新增录入功能：可创建或切换项目、添加成员与任务、提交四类贡献；提交后立即重新读取 SQLite，并以「待验证」状态显示，得分为 0。

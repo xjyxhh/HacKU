@@ -115,6 +115,12 @@ def create_app(db_path=DEFAULT_DB):
     def project_dashboard(project_id: str):
         return read().dashboard_data(project_id)
 
+    @app.get("/api/projects/{project_id}/token-view")
+    def token_view(project_id: str, response: Response):
+        """Read-only stage-1 projection of legacy contributions into the token model."""
+        response.headers["Cache-Control"] = "no-store"
+        return read().token_view(project_id)
+
     @app.get("/api/contributions/{contribution_id}")
     def contribution(contribution_id: str):
         return read().contribution_data(contribution_id)
