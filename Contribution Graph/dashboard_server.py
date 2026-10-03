@@ -34,8 +34,9 @@ from token_store import TokenStore
 
 
 ROOT = Path(__file__).with_name("dashboard")
-DEFAULT_DB = Path(__file__).with_name("data.sqlite3")
-DEFAULT_TOKEN_DB = Path(__file__).with_name("token.sqlite3")
+DATA_DIR = Path(os.environ.get("POCKETBAY_DATA_DIR", Path(__file__).parent))
+DEFAULT_DB = DATA_DIR / "data.sqlite3"
+DEFAULT_TOKEN_DB = DATA_DIR / "token.sqlite3"
 
 
 def token_issue(error: Exception) -> str:
@@ -181,6 +182,9 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None, token_admin_key=None):
     db_path = Path(db_path)
     token_db_path = Path(token_db_path) if token_db_path else DEFAULT_TOKEN_DB
     token_admin_key = token_admin_key if token_admin_key is not None else os.environ.get("TOKEN_ADMIN_KEY")
+    if os.environ.get("POCKETBAY_DATA_DIR") and db_path == DEFAULT_DB and not db_path.exists():
+        from import_json import import_json
+        import_json(Path(__file__).with_name("data.json"), db_path)
 
     @app.middleware("http")
     async def protect_token_writes(request: Request, call_next):
@@ -795,11 +799,12 @@ if __name__ == "__main__":
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--token-db", type=Path, default=DEFAULT_TOKEN_DB,
                         help="durable token ledger database (created on first use)")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     args = parser.parse_args()
     if args.db == DEFAULT_DB and not args.db.is_file():
         parser.error(f"database not found: {args.db}; import data.json with import_json.py first")
     print(f"SQLite database: {args.db.resolve()}", flush=True)
     print(f"Token ledger database: {args.token_db.resolve()}", flush=True)
     print(f"API writes: {'enabled' if os.environ.get('TOKEN_ADMIN_KEY') else 'disabled; set TOKEN_ADMIN_KEY'}", flush=True)
-    uvicorn.run(create_app(args.db, args.token_db), host="127.0.0.1", port=args.port)
+    host = "0.0.0.0" if os.environ.get("POCKETBAY_DATA_DIR") else "127.0.0.1"
+    uvicorn.run(create_app(args.db, args.token_db), host=host, port=args.port)

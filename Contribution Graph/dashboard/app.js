@@ -1,8 +1,8 @@
 const english = {
   "跳转到主要内容": "Skip to main content", "正在加载项目…": "Loading project…",
   "例如 FinTech Demo…": "e.g. FinTech Demo…", "例如 fintech-demo…": "e.g. fintech-demo…", "例如 David…": "e.g. David…", "例如 david…": "e.g. david…",
-  "项目看板": "Project Dashboard", "Token 工作台": "Token workspace", "当前项目": "Current project", "切换项目": "Switch project", "设置": "Settings", "语言": "Language", "界面语言": "Interface language",
-  "刷新数据": "Refresh", "页面导航": "Page navigation", "总览": "Overview", "录入": "Add records", "关系图": "Graph", "贡献明细": "Contributions", "贡献审核": "Review",
+  "项目看板": "Project Dashboard", "Token 工作台": "Token Workspace", "当前项目": "Current project", "切换项目": "Switch project", "设置": "Settings", "语言": "Language", "界面语言": "Interface language",
+  "刷新数据": "Refresh", "页面导航": "Page navigation", "总览": "Overview", "录入": "Add records", "关系图": "Graph", "贡献明细": "Contributions", "贡献审核": "Contribution Review",
   "项目总览": "Project overview", "正在加载项目...": "Loading project...", "查看贡献得分、任务价值，以及成员之间的协作关系。": "Explore contribution scores, task values, and team relationships.", "正在读取数据": "Loading data",
   "项目摘要": "Project summary", "团队总分": "Team score", "已验证与已解决贡献": "Verified and resolved contributions", "项目成员": "Members", "参与贡献": "Contributors", "项目任务": "Tasks", "预设任务价值": "Preset task value", "贡献记录": "Contribution records", "等待数据": "Waiting for data",
   "成员贡献": "Member contributions", "选择成员，查看与他相关的贡献": "Select a member to see related contributions", "暂无成员。": "No members yet.", "任务价值": "Task values", "选择任务，筛选贡献明细": "Select a task to filter contributions", "暂无任务。": "No tasks yet.",
@@ -18,7 +18,13 @@ const english = {
   "分": "pts", "价值": "value", "条贡献": "contributions", "条记录": "records", "条暂不计分": "not scored", "暂不计分": "Not scored", "帮助": "Helped", "成员": "Member", "贡献": "Contribution", "选择贡献者": "Select contributor", "选择任务": "Select task", "无": "None", "质量系数": "Quality factor", "任务预设价值": "Preset task value", "完成度": "Completion", "类型 / 状态": "Type / status",
   "先创建一个项目": "Create a project first", "尚无项目": "No projects yet", "数据读取失败": "Data load failed", "保存成功，页面已更新。": "Saved. The page is up to date.", "受帮助成员不能与贡献者相同。": "The helped member must differ from the contributor.", "正在读取贡献详情...": "Loading contribution details...", "0 条贡献": "0 contributions", "0 条记录": "0 records", "筛选成员": "Filter member", "筛选任务": "Filter task", "查看贡献": "View contribution", "查看": "View", "的贡献": "contribution", "帮助成员": "Helped member", "证据": "Evidence", "处理说明": "Resolution note"
 };
+I18n.register(english);
 let language = localStorage.getItem("contribution-language") === "en" ? "en" : "zh";
+document.addEventListener("languagechange", (event) => {
+  if (language === event.detail.language) return;
+  language = event.detail.language;
+  if (currentData) render(currentData);
+});
 const t = (value) => language === "en" ? (english[value] ?? value) : value;
 const statusName = (kind) => t({ PENDING: "待验证", VERIFIED: "已验证", DISPUTED: "争议中", RESOLVED: "已解决" }[kind] ?? kind);
 const typeName = (kind) => t({ CORE: "核心", SUPPORT: "支持", REVIEW: "审查", COORDINATION: "协调" }[kind] ?? kind);
@@ -30,29 +36,9 @@ const tokenAmount = (value) => String(value ?? "0");
 let currentData = null;
 let selectedId = null;
 let projectId = localStorage.getItem("contribution-project") || "fintech";
-const staticText = [];
-const staticAttributes = [];
-const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-while (walker.nextNode()) {
-  const node = walker.currentNode;
-  const source = node.nodeValue.trim();
-  if (source in english) staticText.push({ node, source, before: node.nodeValue.slice(0, node.nodeValue.indexOf(source)), after: node.nodeValue.slice(node.nodeValue.indexOf(source) + source.length) });
-}
-for (const element of document.querySelectorAll("[placeholder], [aria-label]")) {
-  for (const name of ["placeholder", "aria-label"]) {
-    const source = element.getAttribute(name);
-    if (source in english) staticAttributes.push({ element, name, source });
-  }
-}
-
 function setLanguage(next) {
   language = next === "en" ? "en" : "zh";
-  localStorage.setItem("contribution-language", language);
-  document.documentElement.lang = language === "en" ? "en" : "zh-CN";
-  document.title = `Contribution Graph | ${t("项目看板")}`;
-  $("language-select").value = language;
-  for (const { node, source, before, after } of staticText) node.nodeValue = before + t(source) + after;
-  for (const { element, name, source } of staticAttributes) element.setAttribute(name, t(source));
+  I18n.setLanguage(language);
   if (currentData) render(currentData);
   else if (!projectId) {
     $("project-name").textContent = t("先创建一个项目");
@@ -284,7 +270,7 @@ async function request(url, options) {
   let response = await send();
   if (response.status === 403 && options?.method === "POST") {
     sessionStorage.removeItem("tokenAdminKey");
-    key = prompt("请输入账本管理员密钥") || "";
+    key = prompt(I18n.t("请输入账本管理员密钥")) || "";
     if (key) { sessionStorage.setItem("tokenAdminKey", key); response = await send(); }
   }
   const data = await response.json();

@@ -3,7 +3,7 @@ const typeNames = { CORE: "核心", SUPPORT: "支持", REVIEW: "审查", COORDIN
 const decisionNames = { CONFIRM: "确认", ADJUST: "调整", DISPUTE: "提出争议" };
 const $ = (id) => document.getElementById(id);
 const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
-const points = (value) => new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value ?? 0);
+const points = (value) => new Intl.NumberFormat(I18n.language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 2 }).format(value ?? 0);
 const state = { dashboard: null, detail: null, selectedId: null, busy: false, preview: null };
 
 async function request(path, body) {
@@ -15,7 +15,7 @@ async function request(path, body) {
   let response = await send();
   if (response.status === 403 && body !== undefined) {
     sessionStorage.removeItem("tokenAdminKey");
-    key = prompt("请输入账本管理员密钥") || "";
+    key = prompt(I18n.t("请输入账本管理员密钥")) || "";
     if (key) { sessionStorage.setItem("tokenAdminKey", key); response = await send(); }
   }
   const data = await response.json();
@@ -48,8 +48,11 @@ function renderProject() {
   $("pending-count").textContent = data.contributions.filter((item) => item.status === "PENDING").length;
   $("disputed-count").textContent = data.contributions.filter((item) => item.status === "DISPUTED").length;
   $("contribution-count").textContent = data.contributions.length;
-  $("updated").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
+  updateTimestamp();
   renderList();
+}
+function updateTimestamp() {
+  $("updated").textContent = `更新于 ${new Intl.DateTimeFormat(I18n.language === "en" ? "en-US" : "zh-CN", { timeStyle: "medium" }).format(new Date())}`;
 }
 
 function renderList() {
@@ -272,3 +275,4 @@ window.addEventListener("focus", refresh);
 window.addEventListener("storage", (event) => {
   if (event.key === "contribution-graph-update" || event.key === "contribution-project") refresh();
 });
+document.addEventListener("languagechange", () => { if (state.dashboard) updateTimestamp(); });

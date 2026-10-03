@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const number = (value) => typeof value === "string"
-  ? value : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 9 }).format(Number(value) || 0);
+  ? value : new Intl.NumberFormat(I18n.language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 9 }).format(Number(value) || 0);
 const kindName = { MINT: "铸币", TRANSFER: "转账", FREEZE: "冻结", RELEASE: "释放", REFUND: "退款", SPLIT: "分配" };
 const statusName = { DRAFT: "草稿", OFFERED: "已发出", ACCEPTED: "已接受", CREDIT_RESERVED: "已预留", DELIVERED: "已交付", VERIFIED: "已验证", DISPUTED: "争议中", FROZEN: "已冻结", SETTLED: "已结算" };
 const nextStatus = { DRAFT: "OFFERED", OFFERED: "ACCEPTED", ACCEPTED: "CREDIT_RESERVED", CREDIT_RESERVED: "DELIVERED", DELIVERED: "VERIFIED", DISPUTED: "FROZEN", FROZEN: "DELIVERED" };
@@ -14,7 +14,7 @@ async function request(path, body) {
   let response = await send();
   if (response.status === 403 && body !== undefined) {
     sessionStorage.removeItem("tokenAdminKey");
-    key = prompt("请输入服务启动时配置的 TOKEN_ADMIN_KEY") || "";
+    key = prompt(I18n.t("请输入服务启动时配置的 TOKEN_ADMIN_KEY")) || "";
     if (key) {
       sessionStorage.setItem("tokenAdminKey", key);
       response = await send();
@@ -133,7 +133,10 @@ function render() {
   $("graph-nodes").innerHTML = graph.nodes.map((node) => `<span><small>${safe(node.kind)}</small>${safe(node.label)}</span>`).join("");
   $("graph-list").innerHTML = graph.edges.map((edge) => `<div class="graph-edge"><span>${safe(nodeName(edge.source))}</span><span class="graph-edge-kind">${safe(edge.kind)}${edge.amount == null ? "" : ` · ${number(edge.amount)}`}</span><span>${safe(nodeName(edge.destination))}</span></div>`).join("");
   listEmpty("graph-list", graph.edges.length, "还没有关系。创建合约或发生账本事件后会显示在这里。");
-  $("updated").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
+  updateTimestamp();
+}
+function updateTimestamp() {
+  $("updated").textContent = `更新于 ${new Intl.DateTimeFormat(I18n.language === "en" ? "en-US" : "zh-CN", { timeStyle: "medium" }).format(new Date())}`;
 }
 function renderEvents() {
   const events = (state.ledger?.events || []).filter((event) => event.id === focusedEventId || $("event-filter").value === "ALL" || event.kind === $("event-filter").value).slice().reverse();
@@ -308,4 +311,5 @@ window.addEventListener("storage", (event) => {
   if (event.key === "contribution-graph-update" || event.key === "contribution-project") refresh();
 });
 window.addEventListener("focus", refresh);
+document.addEventListener("languagechange", () => { if (state.ledger) updateTimestamp(); });
 refresh();

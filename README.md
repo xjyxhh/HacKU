@@ -2,6 +2,14 @@
 
 一个用于记录团队任务贡献、同伴核验与协作关系的本地 Web 应用。项目按 `CORE`（核心）、`SUPPORT`（支持）、`REVIEW`（审查）和 `COORDINATION`（协调）四类贡献计分；待核验或争议中的贡献暂不计分。项目面向 HacKU 2026 原型演示，适合可信团队在本机使用。
 
+## 在线访问
+
+[PocketBay 上的 HacKU](https://hacku.pocketbay.app) · [贡献审核](https://hacku.pocketbay.app/review.html) · [Token 工作台](https://hacku.pocketbay.app/token.html)
+
+PocketBay 使用 `/data` 持久卷保存贡献与 Token 两份 SQLite 数据库。首次启动从仓库的 `Contribution Graph/data.json` 导入演示数据，后续部署沿用持久卷中的数据。线上写操作需要在 PocketBay 项目环境变量中设置 `TOKEN_ADMIN_KEY`；未设置时写请求返回 503。
+
+部署压缩包可用 `python3 scripts/package_pocketbay.py /tmp/hacku-pocketbay.zip` 生成。脚本仅打包应用源码、页面及数据快照，并将压缩包中的应用目录命名为 `contribution_graph`，以兼容 PocketBay 当前对带空格目录生成的构建路径。
+
 ## 功能
 
 - **贡献录入**：在看板中创建或切换项目、添加成员和任务、提交四类贡献；新贡献以「待验证」状态出现，提交后得分为 0。
