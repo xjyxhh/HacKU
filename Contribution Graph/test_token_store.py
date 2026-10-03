@@ -1,0 +1,192 @@
+"""Tests for TokenStore: durable replay of the token ledger (fusion PR1)."""
+
+import tempfile
+import unittest
+from decimal import Decimal
+from pathlib import Path
+
+from token_engine import (
+    ContractStatus,
+    LedgerEventType,
+    TokenLedger,
+    TokenProject,
+    TokenTask,
+    ValueType,
+)
+from token_store import TokenStore
+
+
+PROJECT = TokenProject("fintech", "FinTech Demo", "treasury", ("alice", "bob", "charlie", "david"))
+TASK = TokenTask("recommendation", "fintech", "Recommendation Engine", ValueType.CORE,
+                 Decimal("100"), "A working recommendation engine with tests")
+
+
+class TokenStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "token.sqlite3"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def open_store(self) -> TokenStore:
+        return TokenStore(self.db)
+
+    def new_store(self) -> TokenStore:
+        store = TokenStore(self.db, PROJECT)
+        store.add_task(TASK)
+        return store
+
+    def verified_contract(self, store, contract_id="commission-1", price="50", maximum="60"):
+        store.create_commission(contract_id, "recommendation", "alice", "bob", price, maximum)
+        for status in (
+            ContractStatus.OFFERED,
+            ContractStatus.ACCEPTED,
+            ContractStatus.CREDIT_RESERVED,
+            ContractStatus.DELIVERED,
+            ContractStatus.VERIFIED,
+        ):
+            store.advance_contract(contract_id, status)
+        return store.ledger.contracts[contract_id]
+
+    def test_create_and_reopen_empty(self):
+        self.new_store()
+        store = self.open_store()
+        self.assertEqual(store.project, PROJECT)
+        self.assertEqual(store.ledger.tasks["recommendation"], TASK)
+        self.assertEqual(store.total_supply(), Decimal("0"))
+        self.assertEqual(store.balances(), {m: Decimal("0") for m in PROJECT.member_ids})
+
+    def test_open_without_project_requires_existing_row(self):
+        with self.assertRaises(ValueError):
+            self.open_store()
+
+    def test_create_project_twice_rejected(self):
+        self.new_store()
+        with self.assertRaises(ValueError):
+            TokenStore(self.db, PROJECT)
+
+    def test_mint_direct_survives_reopen(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:evidence-a"])
+        reopened = self.open_store()
+        self.assertEqual(reopened.balance("alice"), Decimal("40"))
+        self.assertEqual(reopened.total_supply(), Decimal("40"))
+        self.assertEqual(reopened.minted_for_task("recommendation"), Decimal("40"))
+        self.assertEqual(reopened.ledger.events, store.ledger.events)
+
+    def test_duplicate_evidence_rejected_after_reopen(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:evidence-a"])
+        reopened = self.open_store()
+        with self.assertRaises(ValueError):
+            reopened.mint_direct("e2", "recommendation", "bob", "10", ["sha:evidence-a"])
+        self.assertEqual(reopened.balance("bob"), Decimal("0"))
+
+    def test_transfer_survives_reopen(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        store.transfer("e2", "alice", "bob", "15", "recommendation", ["sha:b"])
+        reopened = self.open_store()
+        self.assertEqual(reopened.balance("alice"), Decimal("25"))
+        self.assertEqual(reopened.balance("bob"), Decimal("15"))
+        self.assertEqual(reopened.total_supply(), Decimal("40"))
+
+    def test_commission_settlement_survives_reopen(self):
+        store = self.new_store()
+        self.verified_contract(store)
+        store.settle_commission("commission-1", "60", ["sha:delivered"], ["charlie"])
+        reopened = self.open_store()
+        # price 50 of the verified 60 goes to bob; alice keeps the remainder.
+        self.assertEqual(reopened.balance("alice"), Decimal("10"))
+        self.assertEqual(reopened.balance("bob"), Decimal("50"))
+        self.assertEqual(reopened.total_supply(), Decimal("60"))
+        contract = reopened.ledger.contracts["commission-1"]
+        self.assertEqual(contract.status, ContractStatus.SETTLED)
+        self.assertEqual(contract.verified_mint_value, Decimal("60"))
+        self.assertEqual(contract.approver_ids, ["charlie"])
+        self.assertEqual(contract.evidence_hashes, ["sha:delivered"])
+        # A settled contract cannot be settled again, even after replay.
+        with self.assertRaises(ValueError):
+            reopened.settle_commission("commission-1", "60", ["sha:other"], ["david"])
+
+    def test_failed_write_leaves_file_and_memory_unchanged(self):
+        store = self.new_store()
+        before = self.db.read_bytes()
+        with self.assertRaises(ValueError):
+            # mint cap is 100; 120 must be rejected
+            store.mint_direct("e1", "recommendation", "alice", "120", ["sha:a"])
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(store.balance("alice"), Decimal("0"))
+        self.assertEqual(store.ledger.events, [])
+        # The store stays usable after the rejected write.
+        store.mint_direct("e2", "recommendation", "alice", "40", ["sha:a"])
+        self.assertEqual(self.open_store().balance("alice"), Decimal("40"))
+
+    def test_failed_settlement_rolls_back_atomically(self):
+        store = self.new_store()
+        self.verified_contract(store)
+        before = self.db.read_bytes()
+        with self.assertRaises(ValueError):
+            # alice is the principal and cannot approve her own contract
+            store.settle_commission("commission-1", "60", ["sha:x"], ["alice"])
+        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(store.ledger.contracts["commission-1"].status, ContractStatus.VERIFIED)
+        self.assertEqual(store.total_supply(), Decimal("0"))
+        # A valid settlement still succeeds afterwards.
+        store.settle_commission("commission-1", "60", ["sha:x"], ["charlie"])
+        self.assertEqual(self.open_store().balance("bob"), Decimal("50"))
+
+    def test_replay_matches_live_ledger_event_for_event(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        self.verified_contract(store)
+        store.settle_commission("commission-1", "60", ["sha:b"], ["charlie"])
+        store.transfer("e2", "bob", "david", "5", "recommendation", ["sha:c"])
+        store.advance_contract.__wrapped__ if False else None  # keep lint quiet
+        live = store.ledger
+        replayed = self.open_store().ledger
+        self.assertEqual(replayed.events, live.events)
+        self.assertEqual(replayed.contracts, live.contracts)
+        self.assertEqual(replayed.tasks, live.tasks)
+        self.assertEqual(replayed._minted_evidence, live._minted_evidence)
+        self.assertEqual(replayed._settled_contracts, live._settled_contracts)
+        self.assertEqual(replayed.graph(), live.graph())
+
+    def test_event_sequence_is_continuous_across_reopens(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "10", ["sha:a"])
+        reopened = self.open_store()
+        reopened.mint_direct("e2", "recommendation", "bob", "5", ["sha:b"])
+        sequences = [event.sequence for event in self.open_store().ledger.events]
+        self.assertEqual(sequences, [1, 2])
+
+    def test_task_budget_reflects_reserved_contracts(self):
+        store = self.new_store()
+        store.create_commission("c1", "recommendation", "alice", "bob", "50", "60")
+        reopened = self.open_store()
+        budget = reopened.task_budget("recommendation")
+        self.assertEqual(budget["mintCap"], Decimal("100"))
+        self.assertEqual(budget["minted"], Decimal("0"))
+        self.assertEqual(budget["reserved"], Decimal("60"))
+        self.assertEqual(budget["available"], Decimal("40"))
+
+    def test_ledger_payload_shape(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        payload = self.open_store().ledger_payload()
+        self.assertEqual(payload["projectId"], "fintech")
+        self.assertEqual(payload["treasuryId"], "treasury")
+        self.assertEqual(payload["totalSupply"], 40.0)
+        self.assertEqual(payload["balances"]["alice"], 40.0)
+        self.assertEqual(payload["balances"]["bob"], 0.0)
+        self.assertEqual(len(payload["events"]), 1)
+        event = payload["events"][0]
+        self.assertEqual(event["kind"], "MINT")
+        self.assertEqual(event["amount"], 40.0)
+        self.assertEqual(event["destinationId"], "alice")
+        self.assertEqual(event["taskId"], "recommendation")
+
+
+if __name__ == "__main__":
+    unittest.main()
