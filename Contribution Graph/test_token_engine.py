@@ -136,12 +136,12 @@ class TokenEngineTests(unittest.TestCase):
         self.assertIn("EXECUTED", edge_kinds)
         self.assertIn("CONTRIBUTES_TO", edge_kinds)
         self.assertIn("MINTED", edge_kinds)
-        self.assertIn("PAID", edge_kinds)
+        self.assertIn("TRANSFER", edge_kinds)
         addresses = [node.address for node in graph.nodes]
         self.assertEqual(len(addresses), len(set(addresses)))
         self.assertTrue(all(address[:2] == ("cvn", "fintech") for address in addresses))
         minted = next(edge for edge in graph.edges if edge.kind == "MINTED")
-        paid = next(edge for edge in graph.edges if edge.kind == "PAID")
+        paid = next(edge for edge in graph.edges if edge.kind == "TRANSFER")
         self.assertEqual((minted.amount, paid.amount), (Decimal("60"), Decimal("50")))
 
     def test_invalid_transition_is_rejected_without_mutation(self):

@@ -1,48 +1,50 @@
-const statusNames = { PENDING: "待验证", VERIFIED: "已验证", DISPUTED: "争议中", RESOLVED: "已解决" };
-const typeNames = { CORE: "核心", SUPPORT: "支持", REVIEW: "审查", COORDINATION: "协调" };
-const decisionNames = { CONFIRM: "确认", ADJUST: "调整", DISPUTE: "提出争议" };
+const statusNames = { PENDING: "Pending", VERIFIED: "Verified", DISPUTED: "Disputed", RESOLVED: "Resolved" };
+const typeNames = { CORE: "Core", SUPPORT: "Support", REVIEW: "Review", COORDINATION: "Coordination" };
+const decisionNames = { CONFIRM: "Confirm", ADJUST: "Adjust", DISPUTE: "Raise dispute" };
 const $ = (id) => document.getElementById(id);
 const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const points = (value) => new Intl.NumberFormat(I18n.language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 2 }).format(value ?? 0);
 const state = { dashboard: null, detail: null, selectedId: null, busy: false, preview: null };
 
 async function request(path, body) {
-  let key = sessionStorage.getItem("tokenAdminKey") || "";
-  const send = () => fetch(path, {
+  const response = await fetch(path, {
     cache: "no-store",
-    ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { "X-Token-Admin-Key": key } : {}) }, body: JSON.stringify(body) }),
+    ...(body === undefined ? {} : { method: "POST", headers: window.HacKUAuth?.headers({ "Content-Type": "application/json" }) ?? { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   });
-  let response = await send();
-  if (response.status === 403 && body !== undefined) {
-    sessionStorage.removeItem("tokenAdminKey");
-    key = prompt(I18n.t("请输入账本管理员密钥")) || "";
-    if (key) { sessionStorage.setItem("tokenAdminKey", key); response = await send(); }
-  }
   const data = await response.json();
   if (!response.ok) {
     // FastAPI's schema errors contain an array; business errors contain a string.
     const detail = data.detail ?? data.error;
     const message = Array.isArray(detail)
-      ? detail.map((item) => `${item.loc?.slice(1).join(".") || "输入"}：${item.msg}`).join("；")
-      : detail || `请求失败 (${response.status})`;
-    throw new Error(message);
+      ? detail.map((item) => `${item.loc?.slice(1).join(".") || "Input"}: ${item.msg}`).join("; ")
+      : detail || `Request failed (${response.status})`;
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
 
 function showError(message) { $("error").textContent = message; $("error").hidden = false; }
+function actionError(error) {
+  const hint = error.status === 401 ? "会话已过期，请重新登录。" : error.status === 403 ? "当前身份无此项目或操作权限，请检查登录身份与项目。" : error.status === 409 ? "记录已变化，请刷新数据后重试。" : "";
+  return `${hint}${hint ? " " : ""}${error.message}`;
+}
 function clearMessages() { $("error").hidden = true; $("success").hidden = true; }
 function memberName(id) { return state.dashboard?.members.find((member) => member.id === id)?.name ?? id; }
 function taskName(id) { return state.dashboard?.tasks.find((task) => task.id === id)?.name ?? id; }
 function visibleContributions() {
-  return (state.dashboard?.contributions ?? []).filter((item) => $("status-filter").value === "ALL" || item.status === $("status-filter").value);
+  return (state.dashboard?.contributions ?? []).filter((item) => $("status-filter").value === "ALL" || ($("status-filter").value === "WITHDRAWN" ? item.withdrawalState === "WITHDRAWN" : item.status === $("status-filter").value && item.withdrawalState !== "WITHDRAWN"));
 }
 
 function renderProject() {
   const data = state.dashboard;
   const previousActor = $("actor").value;
-  $("actor").innerHTML = data.members.map((member) => `<option value="${safe(member.id)}">${safe(member.name)}</option>`).join("");
-  if (data.members.some((member) => member.id === previousActor)) $("actor").value = previousActor;
+  const signedIn = window.HacKUAuth?.identity;
+  const availableActors = signedIn?.authenticated ? data.members.filter((member) => member.id === signedIn.memberId) : [];
+  $("actor").innerHTML = availableActors.map((member) => `<option value="${safe(member.id)}">${safe(member.name)}</option>`).join("");
+  if (availableActors.some((member) => member.id === previousActor)) $("actor").value = previousActor;
+  $("actor").disabled = true;
   $("project-name").textContent = data.project.name;
   $("team-score").textContent = points(data.members.reduce((sum, member) => sum + member.totalScore, 0));
   $("pending-count").textContent = data.contributions.filter((item) => item.status === "PENDING").length;
@@ -52,7 +54,7 @@ function renderProject() {
   renderList();
 }
 function updateTimestamp() {
-  $("updated").textContent = `更新于 ${new Intl.DateTimeFormat(I18n.language === "en" ? "en-US" : "zh-CN", { timeStyle: "medium" }).format(new Date())}`;
+  $("updated").textContent = `Updated at ${new Intl.DateTimeFormat("en-US", { timeStyle: "medium" }).format(new Date())}`;
 }
 
 function renderList() {
@@ -60,9 +62,9 @@ function renderList() {
   $("queue-empty").hidden = rows.length > 0;
   $("contribution-list").innerHTML = rows.map((item) => `
     <button class="queue-item" type="button" data-id="${safe(item.id)}" aria-pressed="${item.id === state.selectedId}" ${state.busy ? "disabled" : ""}>
-      <span class="queue-top"><strong>${safe(memberName(item.contributorId))} · ${safe(item.id)}</strong><span class="status ${item.status.toLowerCase()}">${statusNames[item.status]}</span></span>
+      <span class="queue-top"><strong>${safe(memberName(item.contributorId))} · ${safe(item.id)}</strong><span class="status ${item.withdrawalState === "WITHDRAWN" ? "withdrawn" : item.status.toLowerCase()}">${item.withdrawalState === "WITHDRAWN" ? "已撤回" : statusNames[item.status]}</span></span>
       <span class="type">${typeNames[item.type]}</span><div class="task-name">${safe(taskName(item.taskId))}</div><div class="queue-description">${safe(item.description)}</div>
-      <div class="queue-score">${item.status === "PENDING" || item.status === "DISPUTED" ? "暂不计分" : `当前 ${points(item.score)} 分`}</div>
+      <div class="queue-score">${item.withdrawalState === "WITHDRAWN" ? `有效分 0 · 原审核 ${statusNames[item.status]}` : item.status === "PENDING" || item.status === "DISPUTED" ? "Not scored" : `Current: ${points(item.score)} pts`}</div>
     </button>`).join("");
 }
 
@@ -85,23 +87,25 @@ function renderDetail() {
   if (!data) { updateControls(); return; }
   const item = data.contribution;
   $("contribution-id").textContent = `${memberName(item.contributor_id)} · ${item.id}`;
-  $("contribution-status").textContent = statusNames[item.status];
-  $("contribution-status").className = `status ${item.status.toLowerCase()}`;
+  $("contribution-status").textContent = data.withdrawal ? "已撤回" : statusNames[item.status];
+  $("contribution-status").className = `status ${data.withdrawal ? "withdrawn" : item.status.toLowerCase()}`;
   $("description").textContent = item.description;
   const meta = [
-    ["关联任务", data.task.name], ["贡献类型", typeNames[item.type]],
-    ["帮助对象", item.helped_member_id ? memberName(item.helped_member_id) : "未指定"],
-    ["任务价值", `${points(data.task.taskValue)} 分`], ["完成比例", item.completion],
-    ["支持分值", `${points(item.support_value)} 分`], ["质量系数", item.quality],
-    ["提议 / 最终分值", `${points(data.proposedScore)} 分`], ["当前计入团队", `${points(data.currentScore)} 分`],
+    ["Related task", data.task.name], ["Contribution type", typeNames[item.type]],
+    ["Helped member", item.helped_member_id ? memberName(item.helped_member_id) : "Not specified"],
+    ["原审核状态", statusNames[item.status]], ["原分数 / 有效分", `${points(data.originalScore)} / ${points(data.currentScore)}`],
+    ["Task value", `${points(data.task.taskValue)} pts`], ["Completion", item.completion],
+    ["Support value", `${points(item.support_value)} pts`], ["Quality factor", item.quality],
+    ["Proposed / final score", `${points(data.proposedScore)} pts`], ["Current team score", `${points(data.currentScore)} pts`],
   ];
   $("contribution-meta").innerHTML = meta.map(([label, value]) => `<dt>${safe(label)}</dt><dd>${safe(value)}</dd>`).join("");
-  $("score-explanation").textContent = item.status === "PENDING" || item.status === "DISPUTED"
-    ? "这条贡献暂不计分。提议分值表示通过验证或解决争议后可计入的分数。"
-    : "当前分数已计入成员总分和团队贡献占比。";
-  $("evidence-list").innerHTML = data.evidence.length ? data.evidence.map((evidence) => `<li><span class="record-meta">${safe(memberName(evidence.submitted_by))} · ${safe(evidence.kind)}</span>${evidenceReference(evidence)}</li>`).join("") : '<li class="empty">暂无证据。</li>';
-  $("verification-list").innerHTML = data.verifications.length ? data.verifications.map((review) => `<li><span class="record-meta">${safe(memberName(review.reviewer_id))} · ${decisionNames[review.decision]}</span>${safe(review.note || "未填写说明")}</li>`).join("") : '<li class="empty">暂无审核记录。</li>';
-  $("dispute-list").innerHTML = data.disputes.length ? data.disputes.map((dispute) => `<li><span class="record-meta">${safe(memberName(dispute.raised_by))} · ${dispute.resolution === null ? "尚未解决" : "已解决"}</span>原因：${safe(dispute.reason)}${dispute.resolution === null ? "" : `<br>结论：${safe(dispute.resolution)}<br>解决者：${safe(memberName(dispute.resolved_by))}`}</li>`).join("") : '<li class="empty">暂无争议记录。</li>';
+  $("score-explanation").textContent = data.withdrawal ? `已撤回，有效分 0。申请人 ${data.withdrawal.applicantId}；审批人 ${data.withdrawal.reviewerId || "待处理"}；原因：${data.withdrawal.reason}；决定：${data.withdrawal.decisionNote || "无"}。证据与原审核历史保留。`
+    : item.status === "PENDING" || item.status === "DISPUTED"
+    ? "This contribution is not scored yet. The proposed score can count after verification or dispute resolution."
+    : "The current score counts toward member totals and the team share.";
+  $("evidence-list").innerHTML = data.evidence.length ? data.evidence.map((evidence) => `<li><span class="record-meta">${safe(memberName(evidence.submitted_by))} · ${safe(evidence.kind)}</span>${evidenceReference(evidence)}</li>`).join("") : '<li class="empty">No evidence yet.</li>';
+  $("verification-list").innerHTML = data.verifications.length ? data.verifications.map((review) => `<li><span class="record-meta">${safe(memberName(review.reviewer_id))} · ${decisionNames[review.decision]}</span>${safe(review.note || "No note provided")}</li>`).join("") : '<li class="empty">No review history yet.</li>';
+  $("dispute-list").innerHTML = data.disputes.length ? data.disputes.map((dispute) => `<li><span class="record-meta">${safe(memberName(dispute.raised_by))} · ${dispute.resolution === null ? "Unresolved" : "Resolved"}</span>Reason: ${safe(dispute.reason)}${dispute.resolution === null ? "" : `<br>Resolution: ${safe(dispute.resolution)}<br>Resolved by: ${safe(memberName(dispute.resolved_by))}`}</li>`).join("") : '<li class="empty">No dispute history yet.</li>';
   $("completion").value = item.completion;
   $("support-value").value = item.support_value;
   $("quality").value = item.quality;
@@ -126,9 +130,9 @@ function updateControls() {
   const pending = item?.status === "PENDING";
   const disputed = item?.status === "DISPUTED";
   const editable = !!item && hasActor && !self && (pending || disputed);
-  const locked = state.busy || !item || !hasActor;
+  const locked = state.busy || !item || !hasActor || !!state.detail?.withdrawal;
   $("refresh").disabled = state.busy;
-  $("actor").disabled = state.busy || !(state.dashboard?.members.length);
+  $("actor").disabled = true;
   $("status-filter").disabled = state.busy || !state.dashboard;
   for (const button of document.querySelectorAll(".queue-item")) button.disabled = state.busy;
   $("evidence-kind").disabled = locked;
@@ -143,11 +147,11 @@ function updateControls() {
   $("adjust").disabled = locked || self || !pending || !state.preview?.scoreChanged;
   $("dispute").disabled = locked || !(pending || item?.status === "VERIFIED");
   $("resolve").disabled = locked || self || !disputed || !state.preview;
-  $("action-hint").textContent = !item ? "" : item.status === "RESOLVED" ? "争议已解决，可查看最终结果和处理记录。"
-    : self ? "不能确认、调整或解决自己的贡献；可以添加证据或提出争议。"
-    : pending ? "直接确认现有提议分值；调整时先预览，分数必须实际变化。"
-    : disputed ? "填写解决结论并预览最终分数，再提交解决结果。"
-    : "贡献已验证；如需重新核实，填写原因后提出争议。";
+  $("action-hint").textContent = !item ? "" : state.detail?.withdrawal ? "已撤回：仅保留历史，不能再次审核或计分。" : item.status === "RESOLVED" ? "This dispute is resolved. Review the final result and history."
+    : self ? "You cannot confirm, adjust, or resolve your own contribution. You can add evidence or raise a dispute."
+    : pending ? "Confirm the proposed score directly, or preview an adjustment that changes it."
+    : disputed ? "Enter a resolution and preview the final score before submitting."
+    : "This contribution is verified. Enter a reason to raise a dispute if needed.";
 }
 
 function setBusy(value) {
@@ -158,7 +162,7 @@ function setBusy(value) {
 
 function invalidatePreview() {
   state.preview = null;
-  $("preview-result").textContent = "修改分值后先预览，再提交。";
+  $("preview-result").textContent = "Preview the score before submitting changes.";
   updateControls();
 }
 
@@ -170,7 +174,13 @@ async function reloadData() {
   const projectId = projects.some((project) => project.id === preferred)
     ? preferred : projects[0]?.id;
   $("review-project").replaceChildren(...projects.map((project) => new Option(project.name, project.id)));
-  if (!projectId) throw new Error("尚无项目");
+  if (!projectId) {
+    state.dashboard = null;
+    $("project-name").innerHTML = '暂无项目。请由站点管理员先在<a href="/">项目看板</a>创建项目。';
+    $("contribution-list").replaceChildren();
+    $("queue-empty").hidden = false;
+    return;
+  }
   $("review-project").value = projectId;
   state.dashboard = await request(`/api/projects/${encodeURIComponent(projectId)}/dashboard`);
   const rows = visibleContributions();
@@ -184,7 +194,7 @@ async function refresh() {
   if (state.busy) return;
   clearMessages(); setBusy(true);
   try { await reloadData(); }
-  catch (error) { showError(`读取失败：${error.message}`); }
+  catch (error) { showError(`Could not load data: ${actionError(error)}`); }
   finally { setBusy(false); }
 }
 
@@ -194,7 +204,7 @@ async function selectContribution(id) {
   state.selectedId = id; state.detail = null;
   renderList(); renderDetail();
   try { state.detail = await request(`/api/contributions/${encodeURIComponent(id)}`); renderDetail(); }
-  catch (error) { showError(`读取详情失败：${error.message}`); }
+  catch (error) { showError(`Could not load details: ${actionError(error)}`); }
   finally { setBusy(false); }
 }
 
@@ -210,24 +220,24 @@ async function mutate(suffix, body, label) {
     try { localStorage.setItem("contribution-graph-update", `${Date.now()}-${Math.random()}`); } catch { /* Manual refresh remains available. */ }
     await reloadData();
     const token = result.tokenMint ?? result.tokenFrozen ?? result.tokenResolved;
-    const tokenNote = token?.skipped ? ` Token 处理未完成：${token.skipped}。`
-      : token?.kind === "DIRECT" || token?.kind === "COMMISSION" ? ` 已生成 ${points(token.amount)} Token。`
-        : token?.kind === "FREEZE" ? " 关联 Token 已冻结。"
+    const tokenNote = token?.skipped ? ` Token processing incomplete: ${token.skipped}.`
+      : token?.kind === "DIRECT" || token?.kind === "COMMISSION" ? ` ${points(token.amount)} Tokens created.`
+        : token?.kind === "FREEZE" ? " Related Tokens are frozen."
           : token?.finalAmount !== undefined && /[1-9]/.test(token?.correction?.debtExact ?? "0")
-            ? ` Token 已处理，仍有 ${token.correction.debtExact} 待追偿；请到 Token 工作台查看。`
-            : token?.finalAmount !== undefined ? ` Token 已按最终分值 ${points(token.finalAmount)} 更新。` : "";
-    $("success").textContent = `${id}：${label}，数据已保存。团队总分 ${$("team-score").textContent} 分。${tokenNote}`;
+            ? ` Tokens processed; ${token.correction.debtExact} remains due. Check the Token Workspace.`
+            : token?.finalAmount !== undefined ? ` Tokens updated to the final score of ${points(token.finalAmount)}.` : "";
+    $("success").textContent = `${id}: ${label} saved. Team score: ${$("team-score").textContent} pts.${tokenNote}`;
     $("success").hidden = false;
   } catch (error) {
     if (saved) { state.detail = null; renderDetail(); }
-    showError(saved ? `操作已保存，但刷新失败：${error.message}。请点击刷新数据。` : `操作失败：${error.message}`);
+    showError(saved ? `Action saved, but refresh failed: ${actionError(error)}. Select Refresh Data.` : `Action failed: ${actionError(error)}`);
   } finally { setBusy(false); }
 }
 
 async function review(decision) {
   if (state.busy || !state.detail) return;
   const note = $("review-note").value.trim();
-  if (decision === "DISPUTE" && !note) { showError("请填写争议原因。"); $("review-note").focus(); return; }
+  if (decision === "DISPUTE" && !note) { showError("Enter a dispute reason."); $("review-note").focus(); return; }
   if (decision === "ADJUST" && (!state.preview?.scoreChanged || !$("score-form").reportValidity())) return;
   await mutate("reviews", { reviewer_id: $("actor").value, decision, note, ...(decision === "ADJUST" ? scoreChanges() : {}) }, decisionNames[decision]);
 }
@@ -248,8 +258,8 @@ for (const id of ["completion", "support-value", "quality"]) $(id).addEventListe
 $("evidence-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const reference = $("evidence-reference").value.trim();
-  if (!reference) { showError("请填写证据说明或链接。"); return; }
-  await mutate("evidence", { submitted_by: $("actor").value, kind: $("evidence-kind").value, reference }, "添加证据");
+  if (!reference) { showError("Enter an evidence note or link."); return; }
+  await mutate("evidence", { submitted_by: $("actor").value, kind: $("evidence-kind").value, reference }, "Add evidence");
 });
 $("score-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -257,8 +267,8 @@ $("score-form").addEventListener("submit", async (event) => {
   clearMessages(); setBusy(true);
   try {
     state.preview = await request(`/api/contributions/${encodeURIComponent(state.selectedId)}/preview`, scoreChanges());
-    $("preview-result").textContent = `提议 / 原最终分值 ${points(state.preview.proposedScore)} → ${points(state.preview.updatedScore)} 分；当前计入 ${points(state.preview.currentScore)} 分。${state.detail.contribution.status === "PENDING" && !state.preview.scoreChanged ? "分数未变化，可直接确认。" : "预览尚未保存。"}`;
-  } catch (error) { state.preview = null; showError(`预览失败：${error.message}`); }
+    $("preview-result").textContent = `Proposed / previous final score ${points(state.preview.proposedScore)} → ${points(state.preview.updatedScore)} pts; current team score ${points(state.preview.currentScore)} pts. ${state.detail.contribution.status === "PENDING" && !state.preview.scoreChanged ? "The score is unchanged; you can confirm directly." : "Preview not saved."}`;
+  } catch (error) { state.preview = null; showError(`Could not preview score: ${error.message}`); }
   finally { setBusy(false); }
 });
 $("confirm").addEventListener("click", () => review("CONFIRM"));
@@ -266,9 +276,9 @@ $("adjust").addEventListener("click", () => review("ADJUST"));
 $("dispute").addEventListener("click", () => review("DISPUTE"));
 $("resolve").addEventListener("click", async () => {
   const resolution = $("review-note").value.trim();
-  if (!resolution) { showError("请填写解决结论。"); $("review-note").focus(); return; }
+  if (!resolution) { showError("Enter a resolution."); $("review-note").focus(); return; }
   if (!state.preview || !$("score-form").reportValidity()) return;
-  await mutate("resolve", { resolved_by: $("actor").value, resolution, ...scoreChanges() }, "解决争议");
+  await mutate("resolve", { resolved_by: $("actor").value, resolution, ...scoreChanges() }, "Resolve dispute");
 });
 refresh();
 window.addEventListener("focus", refresh);

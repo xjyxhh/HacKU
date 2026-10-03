@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS commission_contracts (
                                              AND CAST(maximum_mint_value AS REAL) <= 1000000000000),
     acceptance_criteria_hash TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('DRAFT', 'OFFERED', 'ACCEPTED', 'CREDIT_RESERVED',
-                                         'DELIVERED', 'VERIFIED', 'DISPUTED', 'FROZEN', 'SETTLED')),
+                                         'DELIVERED', 'VERIFIED', 'DISPUTED', 'FROZEN', 'SETTLED', 'RESOLVED')),
     evidence_hashes TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_hashes) AND json_type(evidence_hashes) = 'array'),
     approver_ids TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(approver_ids) AND json_type(approver_ids) = 'array'),
     verified_mint_value TEXT CHECK (verified_mint_value IS NULL OR
@@ -72,6 +72,34 @@ CREATE TABLE IF NOT EXISTS reconciliation_debts (
     reason TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS contract_approvals (
+    contract_id TEXT NOT NULL REFERENCES commission_contracts(id),
+    member_id TEXT NOT NULL,
+    approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    note TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (contract_id, member_id)
+);
+
+CREATE TABLE IF NOT EXISTS contract_disputes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    contract_id TEXT NOT NULL REFERENCES commission_contracts(id),
+    raised_by TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS contract_resolutions (
+    contract_id TEXT PRIMARY KEY REFERENCES commission_contracts(id),
+    payment_sequence INTEGER,
+    freeze_sequence INTEGER,
+    handled_by TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('CANCELLED', 'RELEASE', 'REFUND', 'SPLIT')),
+    refund_amount TEXT NOT NULL DEFAULT '0',
+    retained_amount TEXT NOT NULL DEFAULT '0',
+    note TEXT NOT NULL CHECK (length(trim(note)) > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS token_tasks_by_project ON token_tasks(project_id);
 CREATE INDEX IF NOT EXISTS commission_contracts_by_project ON commission_contracts(project_id);
 CREATE INDEX IF NOT EXISTS ledger_events_by_project ON ledger_events(project_id);
@@ -101,5 +129,13 @@ WHEN (NEW.kind = 'MINT' AND (
 )) OR (NEW.kind IN ('FREEZE', 'RELEASE') AND NOT EXISTS (
     SELECT 1 FROM token_projects AS p, json_each(p.member_ids) AS m
     WHERE p.id = NEW.project_id AND m.value = NEW.source_id
+)) OR (NEW.kind IN ('REFUND', 'SPLIT') AND (
+    (NEW.source_id NOT LIKE 'escrow:%' AND NOT EXISTS (
+        SELECT 1 FROM token_projects AS p, json_each(p.member_ids) AS m
+        WHERE p.id = NEW.project_id AND m.value = NEW.source_id
+    )) OR NOT EXISTS (
+        SELECT 1 FROM token_projects AS p, json_each(p.member_ids) AS m
+        WHERE p.id = NEW.project_id AND m.value = NEW.destination_id
+    )
 ))
 BEGIN SELECT RAISE(ABORT, 'ledger event member is not in token project'); END;

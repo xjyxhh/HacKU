@@ -38,6 +38,7 @@ class ContractStatus(str, Enum):
     DISPUTED = "DISPUTED"
     FROZEN = "FROZEN"
     SETTLED = "SETTLED"
+    RESOLVED = "RESOLVED"
 
 
 class LedgerEventType(str, Enum):
@@ -168,6 +169,8 @@ class TokenLedger:
         self._minted_by_task: dict[str, Decimal] = {}
         self._settled_contracts: set[str] = set()
         self._frozen_events: dict[int, set[int]] = {}
+        self.contract_resolutions: dict[str, dict] = {}
+        self.contract_disputes: dict[str, dict] = {}
 
     def add_member(self, member_id: str) -> None:
         nonblank(member_id, "member id")
@@ -254,6 +257,90 @@ class TokenLedger:
                 raise ValueError("task mint cap cannot reserve this contract again")
         contract.status = status
         return contract
+
+    def dispute_contract(self, contract_id: str, raised_by: str, reason: str) -> dict:
+        contract = self._contract(contract_id)
+        self._member(raised_by)
+        if raised_by not in {contract.principal_id, contract.contractor_id}:
+            raise ValueError("only contract parties can raise a settled dispute")
+        if contract.status != ContractStatus.SETTLED:
+            raise ValueError("only settled contracts can enter post-settlement dispute")
+        if not reason.strip():
+            raise ValueError("dispute reason is required")
+        contract.status = ContractStatus.DISPUTED
+        record = {"contractId": contract_id, "raisedBy": raised_by, "reason": reason.strip()}
+        self.contract_disputes[contract_id] = record
+        return record
+
+    def freeze_contract_payment(self, contract_id: str, reason: str) -> LedgerEvent:
+        contract = self._contract(contract_id)
+        if contract.status != ContractStatus.DISPUTED:
+            raise ValueError("contract must be disputed before payment freeze")
+        payment = next((event for event in self.events if event.id == f"{contract_id}:payment"), None)
+        if payment is None:
+            raise ValueError("settled contract payment is missing")
+        if self.balance(contract.contractor_id) < payment.amount:
+            raise ValueError("insufficient token balance to freeze")
+        existing = self._frozen_events.get(payment.sequence)
+        if existing:
+            raise ValueError("contract payment is already frozen")
+        event = self.freeze_events([payment.sequence], reason, f"escrow:{contract_id}")[0]
+        contract.status = ContractStatus.FROZEN
+        return event
+
+    def resolve_contract(self, contract_id: str, outcome: str, note: str,
+                         refund_amount=None) -> tuple[dict, list[LedgerEvent]]:
+        contract = self._contract(contract_id)
+        if contract.status != ContractStatus.FROZEN:
+            raise ValueError("contract must be frozen before resolution")
+        if not note.strip():
+            raise ValueError("resolution note is required")
+        outcome = outcome.upper()
+        if outcome == "CANCELLED":
+            if contract.id in self._settled_contracts:
+                raise ValueError("settled contracts require RELEASE, REFUND, or SPLIT")
+            contract.status = ContractStatus.RESOLVED
+            record = {"contractId": contract_id, "outcome": outcome, "refundAmount": ZERO,
+                      "retainedAmount": ZERO, "paymentSequence": None, "freezeSequence": None,
+                      "note": note.strip()}
+            self.contract_resolutions[contract_id] = record
+            return record, []
+        if outcome not in {"RELEASE", "REFUND", "SPLIT"} or contract.id not in self._settled_contracts:
+            raise ValueError("settled contract requires RELEASE, REFUND, or SPLIT")
+        payment = next((event for event in self.events if event.id == f"{contract_id}:payment"), None)
+        if payment is None or len(self._frozen_events.get(payment.sequence, ())) != 1:
+            raise ValueError("contract payment is not held in escrow")
+        refund = ZERO
+        retained = payment.amount
+        before = len(self.events)
+        if outcome == "RELEASE":
+            self.release_events([payment.sequence], note, f"escrow:{contract_id}")
+        elif outcome == "REFUND":
+            refund, retained = payment.amount, ZERO
+            self._event(f"{contract_id}:resolve:refund", LedgerEventType.REFUND,
+                        payment.amount, f"escrow:{contract_id}", contract.principal_id,
+                        contract.task_id, contract_id, payment.evidence_key, note.strip())
+            self._frozen_events[payment.sequence].clear()
+        else:
+            refund = _amount(refund_amount, "refund amount", allow_zero=False)
+            if refund >= payment.amount:
+                raise ValueError("split refund amount must be less than payment")
+            retained = payment.amount - refund
+            self._event(f"{contract_id}:resolve:split:refund", LedgerEventType.SPLIT,
+                        refund, f"escrow:{contract_id}", contract.principal_id,
+                        contract.task_id, contract_id, payment.evidence_key, note.strip())
+            self._event(f"{contract_id}:resolve:split:retained", LedgerEventType.SPLIT,
+                        retained, f"escrow:{contract_id}", contract.contractor_id,
+                        contract.task_id, contract_id, payment.evidence_key, note.strip())
+            self._frozen_events[payment.sequence].clear()
+        freeze = next(event for event in self.events if event.kind == LedgerEventType.FREEZE
+                      and event.id.startswith(f"freeze-seq:{payment.sequence}:"))
+        contract.status = ContractStatus.RESOLVED
+        record = {"contractId": contract_id, "outcome": outcome, "refundAmount": refund,
+                  "retainedAmount": retained, "paymentSequence": payment.sequence,
+                  "freezeSequence": freeze.sequence, "note": note.strip()}
+        self.contract_resolutions[contract_id] = record
+        return record, self.events[before:]
 
     def mint_direct(self, event_id: str, task_id: str, recipient_id: str, amount, evidence_hashes) -> LedgerEvent:
         task = self._task(task_id)
@@ -430,7 +517,8 @@ class TokenLedger:
         """Tokens currently held by project members, excluding frozen or returned tokens."""
         supply = ZERO
         for event in self.events:
-            if event.kind in {LedgerEventType.MINT, LedgerEventType.RELEASE}:
+            if event.kind in {LedgerEventType.MINT, LedgerEventType.RELEASE,
+                               LedgerEventType.REFUND, LedgerEventType.SPLIT}:
                 supply += event.amount
             elif event.kind == LedgerEventType.FREEZE or (
                 event.kind == LedgerEventType.TRANSFER
@@ -448,7 +536,8 @@ class TokenLedger:
         minted = self.minted_for_task(task_id)
         reserved = sum((contract.maximum_mint_value for contract in self.contracts.values()
                         if contract.task_id == task_id and contract.status not in
-                        {ContractStatus.SETTLED, ContractStatus.DISPUTED, ContractStatus.FROZEN}), ZERO)
+                        {ContractStatus.SETTLED, ContractStatus.DISPUTED, ContractStatus.FROZEN,
+                         ContractStatus.RESOLVED}), ZERO)
         return {"mintCap": task.mint_cap, "minted": minted, "reserved": reserved,
                 "available": max(ZERO, task.mint_cap - minted - reserved)}
 
@@ -485,12 +574,19 @@ class TokenLedger:
             ))
         for event in self.events:
             if event.kind in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
+                if event.kind == LedgerEventType.FREEZE and event.destination_id and event.destination_id.startswith("escrow:"):
+                    address = prefix + ("escrow", event.destination_id)
+                    nodes[address] = GraphNode(address, "ESCROW", event.destination_id)
                 continue
-            source = treasury_addr if event.source_id == self.project.treasury_id else prefix + ("member", event.source_id or "")
+            if event.source_id and event.source_id.startswith("escrow:"):
+                source = prefix + ("escrow", event.source_id)
+                nodes[source] = GraphNode(source, "ESCROW", event.source_id)
+            else:
+                source = treasury_addr if event.source_id == self.project.treasury_id else prefix + ("member", event.source_id or "")
             destination = (treasury_addr if event.destination_id == self.project.treasury_id
                            else prefix + ("member", event.destination_id or ""))
             edges.append(GraphEdge(prefix + ("edge", event.kind.value.lower(), event.id),
-                                   "MINTED" if event.kind == LedgerEventType.MINT else "PAID",
+                                   "MINTED" if event.kind == LedgerEventType.MINT else event.kind.value,
                                    source, destination, event.amount))
         return ContributionGraph(tuple(nodes[key] for key in sorted(nodes)), tuple(edges))
 

@@ -2,9 +2,11 @@
 
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as BareTestClient
+from test_auth_support import AuthenticatedClient
 
 from dashboard_server import create_app
 
@@ -14,8 +16,7 @@ class ReviewApiTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "shared.json"
-        self.client = TestClient(create_app(self.path, self.path.with_name("token.sqlite3"),
-                                           token_admin_key="test-key"),
+        self.client = AuthenticatedClient(create_app(self.path, self.path.with_name("token.sqlite3")),
                                  headers={"X-Token-Admin-Key": "test-key"})
         self.addCleanup(self.client.close)
         self.client.post("/api/projects", json={"id": "fintech", "name": "Team"})
@@ -41,10 +42,14 @@ class ReviewApiTests(unittest.TestCase):
         return self.client.get(f"/api/contributions/{contribution_id}").json()
 
     def assert_rejected_without_write(self, route, payload, status=400):
-        before = self.path.read_bytes()
+        def business_state():
+            with sqlite3.connect(self.path) as conn:
+                tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'auth_%' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+                return {table: conn.execute(f'SELECT * FROM "{table}"').fetchall() for table in tables}
+        before = business_state()
         response = self.client.post(route, json=payload)
         self.assertEqual(response.status_code, status, response.text)
-        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(business_state(), before)
 
     def test_review_page_and_assets_are_served(self):
         for path in ("/review.html", "/review.js", "/review.css"):
@@ -88,7 +93,7 @@ class ReviewApiTests(unittest.TestCase):
                 "submitted_by": "alice", "kind": kind, "reference": reference,
             })
             self.assertEqual(response.status_code, 201)
-        with TestClient(create_app(self.path, self.path.with_name("token.sqlite3"), token_admin_key="test-key"),
+        with AuthenticatedClient(create_app(self.path, self.path.with_name("token.sqlite3")),
                         headers={"X-Token-Admin-Key": "test-key"}) as reloaded:
             record = reloaded.get("/api/contributions/core").json()
         self.assertEqual([item["kind"] for item in record["evidence"]], ["NOTE", "URL", "IMAGE", "GITHUB_PR"])
@@ -97,9 +102,10 @@ class ReviewApiTests(unittest.TestCase):
     def test_adjust_dispute_resolve_refreshes_scores_and_graph(self):
         self.assertEqual(self.review("support", "ADJUST", support_value=6, note="Reviewed work").status_code, 200)
         dashboard = self.client.get("/api/projects/fintech/dashboard").json()
-        self.assertEqual(dashboard["members"][0]["totalScore"], 6)
-        self.assertEqual(dashboard["members"][0]["breakdown"]["SUPPORT"], 6)
-        self.assertEqual(dashboard["members"][0]["contributionShare"], 100)
+        alice = next(member for member in dashboard["members"] if member["id"] == "alice")
+        self.assertEqual(alice["totalScore"], 6)
+        self.assertEqual(alice["breakdown"]["SUPPORT"], 6)
+        self.assertEqual(alice["contributionShare"], 100)
         self.assertEqual(dashboard["relationships"][0]["score"], 6)
         self.assertEqual(self.review("support", "DISPUTE", note="Attribution needs review").status_code, 200)
         preview = self.client.post("/api/contributions/support/preview", json={"support_value": 5}).json()
@@ -113,11 +119,11 @@ class ReviewApiTests(unittest.TestCase):
             "resolved_by": "bob", "resolution": "Agreed on five points", "support_value": 5,
         })
         self.assertEqual(response.status_code, 200)
-        with TestClient(create_app(self.path, self.path.with_name("token.sqlite3"), token_admin_key="test-key"),
+        with AuthenticatedClient(create_app(self.path, self.path.with_name("token.sqlite3")),
                         headers={"X-Token-Admin-Key": "test-key"}) as reloaded:
             dashboard = reloaded.get("/api/dashboard").json()
             record = reloaded.get("/api/contributions/support").json()
-        self.assertEqual(dashboard["members"][0]["totalScore"], 5)
+        self.assertEqual(next(member for member in dashboard["members"] if member["id"] == "alice")["totalScore"], 5)
         self.assertEqual(dashboard["relationships"][0]["score"], 5)
         self.assertEqual(record["contribution"]["status"], "RESOLVED")
         self.assertEqual([item["decision"] for item in record["verifications"]], ["ADJUST", "DISPUTE"])
@@ -140,10 +146,10 @@ class ReviewApiTests(unittest.TestCase):
         for payload in ({"decision": "DISPUTE", "note": " "}, {"decision": "ADJUST"},
                         {"decision": "ADJUST", "completion": 1},
                         {"decision": "ADJUST", "quality": 2},
-                        {"decision": "CONFIRM", "completion": 0.8},
-                        {"decision": "CONFIRM", "reviewer_id": "outsider"}):
+                        {"decision": "CONFIRM", "completion": 0.8}):
             with self.subTest(payload=payload):
                 self.assert_rejected_without_write("/api/contributions/core/reviews", {"reviewer_id": "bob", **payload})
+        self.assert_rejected_without_write("/api/contributions/core/reviews", {"reviewer_id": "outsider", "decision": "CONFIRM"}, 403)
         self.assert_rejected_without_write("/api/contributions/core/resolve", {"resolved_by": "bob", "resolution": "Not disputed"})
         self.review("core", "CONFIRM")
         self.assert_rejected_without_write("/api/contributions/core/reviews", {"reviewer_id": "bob", "decision": "CONFIRM"})

@@ -6,6 +6,12 @@ __pycache__/
 .venv/
 *.py[cod]
 Contribution Graph/*.sqlite3*
+Contribution Graph/token-ledgers/
+Contribution Graph/project-locks/
+Contribution Graph/private/
+hacku-auth-seed.json
+*auth-seed*.json
+*auth-experiment*.sqlite3*
 ~$*
 Contribution Graph.zip
 output/

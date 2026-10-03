@@ -61,7 +61,31 @@ def _write(method):
                 conn.execute("BEGIN IMMEDIATE")
                 self._load(conn)
                 self._conn = conn
+                project_id = None
+                if method.__name__ != "create_project" and args:
+                    if method.__name__ in {"add_member", "add_task", "submit_contribution"}:
+                        project_id = args[0]
+                    else:
+                        row=conn.execute("SELECT project_id FROM contributions WHERE id=?",(args[0],)).fetchone()
+                        project_id=row[0] if row else None
+                if project_id and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lifecycle'").fetchone():
+                    lifecycle=conn.execute("SELECT state FROM project_lifecycle WHERE project_id=?",(project_id,)).fetchone()
+                    if lifecycle and lifecycle[0] != "ACTIVE":
+                        raise ValueError("project is archived")
                 result = method(self, *args, **kwargs)
+                project_id = project_id or None
+                if method.__name__ == "create_project":
+                    project_id = args[0]
+                elif method.__name__ in {"add_member", "add_task", "submit_contribution"}:
+                    project_id = args[0]
+                elif args:
+                    contribution_id = args[0]
+                    row = conn.execute("SELECT project_id FROM contributions WHERE id=?", (contribution_id,)).fetchone()
+                    project_id = row[0] if row else None
+                if project_id and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_versions'").fetchone():
+                    conn.execute("INSERT INTO project_versions(project_id,version) VALUES(?,2) ON CONFLICT(project_id) DO UPDATE SET version=project_versions.version+1", (project_id,))
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lifecycle'").fetchone():
+                        conn.execute("UPDATE project_lifecycle SET version=version+1 WHERE project_id=?", (project_id,))
                 conn.commit()
                 return result
             except Exception:
@@ -167,6 +191,8 @@ class ContributionStore:
             raise ValueError("project id must be new and name must be nonempty")
         project = Project(project_id, name)
         self._conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (project_id, name))
+        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_lifecycle'").fetchone():
+            self._conn.execute("INSERT OR IGNORE INTO project_lifecycle(project_id) VALUES(?)",(project_id,))
         return project
 
     @_write
@@ -179,9 +205,15 @@ class ContributionStore:
             member = Member(member_id, name)
             self._conn.execute("INSERT INTO members (id, name) VALUES (?, ?)", (member_id, name))
         elif member.name != name:
-            raise ValueError("existing member id has a different name")
+            joined = self._conn.execute("SELECT 1 FROM project_members WHERE member_id=? LIMIT 1", (member_id,)).fetchone()
+            if joined:
+                raise ValueError("existing member id has a different name")
+            self._conn.execute("UPDATE members SET name=? WHERE id=?", (name, member_id))
+            member = Member(member_id, name)
         self._conn.execute("INSERT INTO project_members (project_id, member_id) VALUES (?, ?)",
                            (project.id, member_id))
+        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_membership_state'").fetchone():
+            self._conn.execute("INSERT OR IGNORE INTO project_membership_state(project_id,member_id) VALUES(?,?)",(project.id,member_id))
         return member
 
     @_write
@@ -226,6 +258,10 @@ class ContributionStore:
     def project_scores(self, project_id):
         project = self._project(project_id)
         contributions = [item for item in self.contributions.values() if item.project_id == project_id]
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_withdrawals'").fetchone():
+                withdrawn={row[0] for row in conn.execute("SELECT contribution_id FROM contribution_withdrawals")}
+                contributions=[item for item in contributions if item.id not in withdrawn]
         return score_members(project, self.members, self.tasks, contributions)
 
     @_write
@@ -318,7 +354,21 @@ class ContributionStore:
     def dashboard_data(self, project_id):
         project = self._project(project_id)
         contributions = [item for item in self.contributions.values() if item.project_id == project_id]
-        scores = score_members(project, self.members, self.tasks, contributions)
+        with self._connect() as conn:
+            withdrawn = {row[0] for row in conn.execute(
+                "SELECT contribution_id FROM contribution_withdrawals"
+            )} if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_withdrawals'").fetchone() else set()
+            requests = {row[0]: {"id": row[1], "applicantId": row[2], "reason": row[3], "state": row[4]}
+                        for row in conn.execute("SELECT contribution_id,id,applicant_id,reason,state FROM contribution_unwind_requests WHERE state='PENDING'")} if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_unwind_requests'").fetchone() else {}
+            request_history = {}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_unwind_requests'").fetchone():
+                for row in conn.execute("SELECT contribution_id,id,applicant_id,reason,state,reviewer_id,decision_note FROM contribution_unwind_requests ORDER BY rowid"):
+                    request_history[row[0]] = {"id":row[1],"applicantId":row[2],"reason":row[3],"state":row[4],"reviewerId":row[5],"decisionNote":row[6]}
+            member_states = {row[0]: row[1] for row in conn.execute("SELECT member_id,state FROM project_membership_state WHERE project_id=?",(project_id,))} if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_membership_state'").fetchone() else {}
+            exit_requests = {row[1]: {"id":row[0],"reason":row[2],"state":row[3],"contributionIds":json.loads(row[4] or "[]")}
+                             for row in conn.execute("SELECT id,member_id,reason,state,contribution_ids_snapshot FROM membership_exit_requests WHERE project_id=? AND state='PENDING'",(project_id,))} if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='membership_exit_requests'").fetchone() else {}
+        scores = score_members(project, self.members, self.tasks,
+                               [item for item in contributions if item.id not in withdrawn])
         records = []
         for item in contributions:
             records.append({
@@ -329,7 +379,10 @@ class ContributionStore:
                 "description": item.description,
                 "helpedMemberId": item.helped_member_id,
                 "status": item.status.value,
-                "score": float(contribution_score(item, project, self.members, self.tasks)),
+                "score": 0.0 if item.id in withdrawn else float(contribution_score(item, project, self.members, self.tasks)),
+                "withdrawalState": "WITHDRAWN" if item.id in withdrawn else "ACTIVE",
+                "unwindRequest": requests.get(item.id),
+                "latestUnwindRequest": request_history.get(item.id),
             })
         relationships = [
             {
@@ -340,6 +393,7 @@ class ContributionStore:
                 "type": item["type"],
                 "status": item["status"],
                 "score": item["score"],
+                "withdrawalState": item["withdrawalState"],
             }
             for item in records if item["helpedMemberId"] is not None
         ]
@@ -348,6 +402,8 @@ class ContributionStore:
             "members": [{
                 "id": member_id,
                 "name": self.members[member_id].name,
+                "membershipState": member_states.get(member_id,"ACTIVE"),
+                "exitRequest": exit_requests.get(member_id),
                 "totalScore": float(scores[member_id].total_score),
                 "totalScoreExact": str(scores[member_id].total_score),
                 "contributionShare": float(scores[member_id].contribution_share),
@@ -372,13 +428,22 @@ class ContributionStore:
         record.update(type=contribution.type.value, status=contribution.status.value,
                       completion=str(contribution.completion), quality=str(contribution.quality),
                       support_value=str(contribution.support_value))
+        original_score=contribution_score(contribution,self._project(contribution.project_id),self.members,self.tasks)
+        withdrawal=None
+        if self._conn is not None:
+            row=self._conn.execute("SELECT r.id,r.applicant_id,r.reason,r.state,r.reviewer_id,r.decision_note,w.effective_at FROM contribution_withdrawals w JOIN contribution_unwind_requests r ON r.id=w.request_id WHERE w.contribution_id=?",(contribution_id,)).fetchone() if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_withdrawals'").fetchone() else None
+        else:
+            with self._connect() as conn:
+                row=conn.execute("SELECT r.id,r.applicant_id,r.reason,r.state,r.reviewer_id,r.decision_note,w.effective_at FROM contribution_withdrawals w JOIN contribution_unwind_requests r ON r.id=w.request_id WHERE w.contribution_id=?",(contribution_id,)).fetchone() if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_withdrawals'").fetchone() else None
+        if row: withdrawal={"requestId":row[0],"applicantId":row[1],"reason":row[2],"state":row[3],"reviewerId":row[4],"decisionNote":row[5],"effectiveAt":row[6]}
         return {
             "contribution": record,
             "task": {"id": task.id, "name": task.name, "taskValue": str(task.task_value)},
-            "currentScore": float(contribution_score(
-                contribution, self._project(contribution.project_id), self.members, self.tasks)),
-            "currentScoreExact": str(contribution_score(
-                contribution, self._project(contribution.project_id), self.members, self.tasks)),
+            "currentScore": 0.0 if withdrawal else float(original_score),
+            "currentScoreExact": "0" if withdrawal else str(original_score),
+            "originalScore": float(original_score),
+            "originalScoreExact": str(original_score),
+            "withdrawal": withdrawal,
             "tokenMintEventId": (
                 f"{contribution.id}:commission:mint"
                 if contribution.type == ContributionType.SUPPORT and contribution.helped_member_id
@@ -434,12 +499,17 @@ class ContributionStore:
         """Project stored contributions into the token model without changing any data."""
         project = self._project(project_id)
         items = [item for item in self.contributions.values() if item.project_id == project_id]
-        scores = score_members(project, self.members, self.tasks, items)
+        with self._connect() as conn:
+            withdrawn={row[0] for row in conn.execute("SELECT contribution_id FROM contribution_withdrawals")} if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='contribution_withdrawals'").fetchone() else set()
+        scores = score_members(project, self.members, self.tasks, [item for item in items if item.id not in withdrawn])
 
         planned = []
         skipped = []
         mint_totals = {task_id: ZERO for task_id in project.task_ids}
         for item in items:
+            if item.id in withdrawn:
+                skipped.append(self._token_skip(item,"贡献已撤回，不再铸币"))
+                continue
             amount = contribution_score(item, project, self.members, self.tasks)
             if item.status not in (ContributionStatus.VERIFIED, ContributionStatus.RESOLVED):
                 skipped.append(self._token_skip(item, f"状态 {item.status.value} 暂不计分"))

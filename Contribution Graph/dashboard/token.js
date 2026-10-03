@@ -2,29 +2,21 @@ const $ = (id) => document.getElementById(id);
 const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const number = (value) => typeof value === "string"
   ? value : new Intl.NumberFormat(I18n.language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 9 }).format(Number(value) || 0);
-const kindName = { MINT: "铸币", TRANSFER: "转账", FREEZE: "冻结", RELEASE: "释放", REFUND: "退款", SPLIT: "分配" };
-const statusName = { DRAFT: "草稿", OFFERED: "已发出", ACCEPTED: "已接受", CREDIT_RESERVED: "已预留", DELIVERED: "已交付", VERIFIED: "已验证", DISPUTED: "争议中", FROZEN: "已冻结", SETTLED: "已结算" };
+const kindName = { MINT: "Mint", TRANSFER: "Transfer", FREEZE: "Freeze", RELEASE: "Release", REFUND: "Refund", SPLIT: "Allocation" };
+const statusName = { DRAFT: "Draft", OFFERED: "Offered", ACCEPTED: "Accepted", CREDIT_RESERVED: "Reserved", DELIVERED: "Delivered", VERIFIED: "Verified", DISPUTED: "Disputed", FROZEN: "Frozen", SETTLED: "Settled", RESOLVED: "Resolved" };
 const nextStatus = { DRAFT: "OFFERED", OFFERED: "ACCEPTED", ACCEPTED: "CREDIT_RESERVED", CREDIT_RESERVED: "DELIVERED", DELIVERED: "VERIFIED", DISPUTED: "FROZEN", FROZEN: "DELIVERED" };
-const state = { ledger: null, graph: null, contracts: [], tasks: [], budgets: {}, debts: [], projects: [], busy: false };
+const state = { ledger: null, graph: null, contracts: [], tasks: [], budgets: {}, debts: [], projects: [], projectId: "", busy: false };
 const focusedEventId = new URLSearchParams(location.search).get("event");
+const tokenApi = (path) => `/api/projects/${encodeURIComponent(state.projectId)}/token/${String(path).replace(/^\/api\/token\/?/, "")}`;
 
 async function request(path, body) {
-  let key = sessionStorage.getItem("tokenAdminKey") || "";
-  const send = () => fetch(path, { cache: "no-store", ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { "X-Token-Admin-Key": key } : {}) }, body: JSON.stringify(body) }) });
-  let response = await send();
-  if (response.status === 403 && body !== undefined) {
-    sessionStorage.removeItem("tokenAdminKey");
-    key = prompt(I18n.t("请输入服务启动时配置的 TOKEN_ADMIN_KEY")) || "";
-    if (key) {
-      sessionStorage.setItem("tokenAdminKey", key);
-      response = await send();
-      if (response.status === 403) sessionStorage.removeItem("tokenAdminKey");
-    }
-  }
+  const response = await fetch(path, { cache: "no-store", ...(body === undefined ? {} : { method: "POST", headers: window.HacKUAuth?.headers({ "Content-Type": "application/json" }) ?? { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
   const data = await response.json();
   if (!response.ok) {
     const detail = data.detail ?? data.error;
-    throw new Error(Array.isArray(detail) ? detail.map((item) => `${item.loc?.slice(1).join(".") || "输入"}：${item.msg}`).join("；") : detail || `请求失败 (${response.status})`);
+    const error = new Error(Array.isArray(detail) ? detail.map((item) => `${item.loc?.slice(1).join(".") || "Input"}: ${item.msg}`).join("; ") : detail || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -32,14 +24,23 @@ function message(text, error = false) {
   $(error ? "error" : "notice").textContent = text;
   $(error ? "error" : "notice").hidden = false;
 }
+function actionError(error) {
+  const detail = error.message.toLowerCase();
+  const hint = error.status === 401 ? "会话已过期，请重新登录。" : error.status === 403 ? "当前身份无此项目或操作权限。" : error.status === 409 && (detail.includes("ledger") || detail.includes("initial")) ? "项目账本待初始化，请使用重试初始化。" : error.status === 409 && (detail.includes("balance") || detail.includes("insufficient")) ? "余额不足，请查看债务并在收到新 Token 后追偿。" : error.status === 409 ? "账本状态已变化，请刷新后重试。" : "";
+  return `${hint}${hint ? " " : ""}${error.message}`;
+}
 function clearMessages() { $("error").hidden = true; $("notice").hidden = true; }
 function setBusy(value) {
   state.busy = value;
   for (const button of document.querySelectorAll("button")) button.disabled = value;
   document.querySelector("main").setAttribute("aria-busy", String(value));
   if (!value) {
-    $("migrate").disabled = !$("legacy-project").value;
     if (state.ledger) renderFreezeOptions();
+    window.HacKUAuth?.refresh()?.then(() => {
+      const identity=window.HacKUAuth.identity;
+      const admin=identity.siteAdmin || identity.projects?.some((project)=>project.id===state.projectId && project.admin);
+      $("retry-ledger").disabled=!state.projectId || !admin;
+    });
   }
 }
 const projectName = (id) => state.projects.find((project) => project.id === id)?.name || id;
@@ -99,49 +100,61 @@ function render() {
   $("member-count").textContent = ledger.memberIds.length;
   $("task-count").textContent = tokenTasks().length;
   $("event-count").textContent = ledger.events.length;
-  $("treasury").textContent = `金库 ${ledger.treasuryId}`;
+  $("treasury").textContent = `Treasury ${ledger.treasuryId}`;
   $("balance-list").innerHTML = ledger.memberIds.map((id) => `<div class="balance-row"><span>${safe(id)}</span><strong>${number(ledger.balancesExact?.[id] ?? ledger.balances[id])}</strong></div>`).join("");
-  listEmpty("balance-list", ledger.memberIds.length, "账本尚无成员。");
+  listEmpty("balance-list", ledger.memberIds.length, "No ledger members yet.");
   const openDebts = state.debts.filter((debt) => /[1-9]/.test(debt.remainingExact));
   $("debt-list").innerHTML = openDebts
-    .map((debt) => `<article class="token-row"><div><strong>${safe(debt.debtorId)} · ${safe(debt.id)}</strong><small>任务 ${safe(debt.taskId)} · 应收 ${safe(debt.amountExact)}</small><p>尚待追偿 ${safe(debt.remainingExact)}</p></div><button type="button" data-collect="${safe(debt.id)}">追偿可用余额</button></article>`).join("");
-  listEmpty("debt-list", openDebts.length, "没有待追偿余额。");
+    .map((debt) => `<article class="token-row"><div><strong>${safe(debt.debtorId)} · ${safe(debt.id)}</strong><small>Task ${safe(debt.taskId)} · Receivable ${safe(debt.amountExact)}</small><p>Still due: ${safe(debt.remainingExact)}</p></div><button type="button" data-collect="${safe(debt.id)}">Recover available balance</button></article>`).join("");
+  listEmpty("debt-list", openDebts.length, "No outstanding recovery.");
   const taskEntries = tokenTasks().map((task) => [task.id, task.name]);
   $("task-list").innerHTML = taskEntries.map(([id, name]) => {
     const budget = budgets[id];
     const task = state.tasks.find((item) => item.id === id);
-    return `<article class="token-row"><div><strong>${safe(name)}</strong><small>${safe(id)} · ${safe(task.valueType)}</small><p>验收标准：${safe(task.acceptanceCriteria)}</p><form class="cap-form" data-id="${safe(id)}"><label>调整铸币上限<input name="mint_cap" type="number" min="0" step="any" value="${safe(task.mintCap)}" required></label><button type="submit">保存上限</button></form></div><dl class="budget-values"><div><dt>上限</dt><dd>${number(budget.mintCap)}</dd></div><div><dt>已铸</dt><dd>${number(budget.minted)}</dd></div><div><dt>预留</dt><dd>${number(budget.reserved)}</dd></div><div><dt>可用</dt><dd>${number(budget.available)}</dd></div></dl></article>`;
+    return `<article class="token-row"><div><strong>${safe(name)}</strong><small>${safe(id)} · ${safe(task.valueType)}</small><p>Acceptance criteria: ${safe(task.acceptanceCriteria)}</p><form class="cap-form" data-id="${safe(id)}"><label>Adjust mint cap<input name="mint_cap" type="number" min="0" step="any" value="${safe(task.mintCap)}" required></label><button type="submit">Save cap</button></form></div><dl class="budget-values"><div><dt>Cap</dt><dd>${number(budget.mintCap)}</dd></div><div><dt>Minted</dt><dd>${number(budget.minted)}</dd></div><div><dt>Reserved</dt><dd>${number(budget.reserved)}</dd></div><div><dt>Available</dt><dd>${number(budget.available)}</dd></div></dl></article>`;
   }).join("");
-  listEmpty("task-list", taskEntries.length, "暂无 Token 任务，请先添加任务。");
+  listEmpty("task-list", taskEntries.length, "No Token tasks yet. Add a task first.");
   selectOptions(".task-select", taskEntries);
   const members = ledger.memberIds.map((id) => [id, id]);
   selectOptions(".member-select", members);
-  selectOptions("#destination-select", [...members, [ledger.treasuryId, `金库 · ${ledger.treasuryId}`]]);
+    selectOptions("#destination-select", [...members, [ledger.treasuryId, `Treasury · ${ledger.treasuryId}`]]);
   $("contract-list").innerHTML = contracts.map((contract) => {
     const next = nextStatus[contract.status];
-    const approvers = ledger.memberIds.filter((id) => id !== contract.principalId && id !== contract.contractorId);
-    const canSettle = contract.status === "VERIFIED" && approvers.length > 0;
-    const canDispute = contract.status === "DELIVERED" || contract.status === "VERIFIED";
-    return `<article class="token-row contract-row"><div><strong>${safe(contract.id)}</strong><small>${safe(contract.principalId)} → ${safe(contract.contractorId)} · ${safe(contract.taskId)}</small><p>价格 ${number(contract.contractPriceExact ?? contract.contractPrice)}，最高铸币 ${number(contract.maximumMintValueExact ?? contract.maximumMintValue)}</p>${contract.status === "SETTLED" ? `<p>实际铸币 ${number(contract.verifiedMintValueExact ?? contract.verifiedMintValue)}；批准成员 ${safe(contract.approverIds.join("、"))}；证据 ${safe(contract.evidenceHashes.join("、"))}</p>` : ""}${contract.status === "VERIFIED" && !approvers.length ? "<p>没有独立批准成员；请先在项目中添加第三位成员并同步。</p>" : ""}</div><div class="contract-action"><span class="contract-status">${safe(statusName[contract.status] || contract.status)}</span>${next ? `<button type="button" data-contract="${safe(contract.id)}" data-next="${next}">推进到${safe(statusName[next])}</button>` : ""}${canDispute ? `<button type="button" data-contract="${safe(contract.id)}" data-next="DISPUTED">提出争议</button>` : ""}${canSettle ? `<button type="button" data-settle="${safe(contract.id)}">结算</button>` : ""}</div>${canSettle ? `<form class="settle-form" data-id="${safe(contract.id)}"><label>验证铸币值<input name="verified_mint_value" type="number" min="0.000000001" max="${safe(contract.maximumMintValue)}" step="any" required></label><label>独立批准成员<select name="approver_ids" required>${approvers.map((id) => `<option value="${safe(id)}">${safe(id)}</option>`).join("")}</select></label><label>证据标识<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">确认结算</button></form>` : ""}</article>`;
+    const identity = window.HacKUAuth?.identity || {};
+    const member = identity.memberId;
+    const party = member === contract.principalId || member === contract.contractorId;
+    const projectAdmin = identity.siteAdmin || identity.projects?.some((project) => project.id === ledger.projectId && project.admin);
+    const approvers = contract.approverIds || [];
+    const candidates = ledger.memberIds.filter((id) => id !== contract.principalId && id !== contract.contractorId);
+    const canApprove = contract.status === "VERIFIED" && member && identity.projects?.some((project) => project.id === ledger.projectId) && !party && !approvers.includes(member);
+    const canSettle = contract.status === "VERIFIED" && approvers.length > 0 && projectAdmin;
+    const canDispute = contract.status === "SETTLED" && party;
+    const canFreeze = contract.status === "DISPUTED" && contract.settled && projectAdmin;
+    const canResolve = contract.status === "FROZEN" && projectAdmin && !party;
+    const resolution = contract.resolution;
+    return `<article class="token-row contract-row"><div><strong>${safe(contract.id)}</strong><small>${safe(contract.principalId)} → ${safe(contract.contractorId)} · ${safe(contract.taskId)}</small><p>Price ${number(contract.contractPriceExact ?? contract.contractPrice)}; maximum mint ${number(contract.maximumMintValueExact ?? contract.maximumMintValue)}</p>${contract.settled ? `<p>Minted ${number(contract.verifiedMintValueExact ?? contract.verifiedMintValue)}; payment ${number(contract.contractPriceExact ?? contract.contractPrice)}; independent approvers ${safe(approvers.join(", ") || "None")}; evidence ${safe(contract.evidenceHashes.join(", "))}</p>` : ""}${contract.dispute ? `<p>Dispute reason: ${safe(contract.dispute.reason)} · raised by ${safe(contract.dispute.raisedBy)}</p>` : ""}${resolution ? `<p>Resolution ${safe(resolution.outcome)}: refund ${number(resolution.refundAmount)}, contractor retains ${number(resolution.retainedAmount)}. ${safe(resolution.note)}</p>` : ""}</div><div class="contract-action"><span class="contract-status">${safe(statusName[contract.status] || contract.status)}</span>${next ? `<button type="button" data-contract="${safe(contract.id)}" data-next="${next}">Advance to ${safe(statusName[next])}</button>` : ""}${canApprove ? `<button type="button" data-approve="${safe(contract.id)}" data-principal="${safe(contract.principalId)}" data-contractor="${safe(contract.contractorId)}">Approve independently</button>` : ""}${canDispute ? `<button type="button" data-dispute="${safe(contract.id)}" data-principal="${safe(contract.principalId)}" data-contractor="${safe(contract.contractorId)}">Raise dispute</button>` : ""}${canFreeze ? `<button type="button" data-freeze-contract="${safe(contract.id)}">Freeze payment</button>` : ""}</div>${canSettle ? `<form class="settle-form" data-id="${safe(contract.id)}"><label>Verified mint value<input name="verified_mint_value" type="number" min="0.000000001" max="${safe(contract.maximumMintValue)}" step="any" required></label><p>Recorded approvers: ${safe(approvers.join(", "))}</p><label>Evidence IDs<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">Confirm settlement</button></form>` : ""}${canResolve ? `<form class="contract-resolve-form" data-id="${safe(contract.id)}"><label>Outcome<select name="outcome">${contract.settled ? '<option value="RELEASE">Full release</option><option value="REFUND">Full refund</option><option value="SPLIT">Partial split</option>' : '<option value="CANCELLED">Cancel unsettled contract</option>'}</select></label><label class="refund-amount-field">Refund amount<input name="refund_amount" type="number" min="0.000000001" step="any"></label><label>Resolution note<textarea name="note" required></textarea></label><button type="submit">Record resolution</button></form>` : ""}</article>`;
   }).join("");
-  listEmpty("contract-list", contracts.length, "暂无委托合约。");
-  for (const form of document.querySelectorAll(".settle-form")) form.hidden = true;
+  listEmpty("contract-list", contracts.length, "No commission contracts yet.");
+  for (const form of document.querySelectorAll(".contract-resolve-form")) {
+    const split = form.elements.outcome.value === "SPLIT";
+    form.querySelector(".refund-amount-field").hidden = !split;
+  }
   renderEvents();
   renderFreezeOptions();
-  $("graph-summary").textContent = `${graph.nodes.length} 个节点，${graph.edges.length} 条关系`;
+  $("graph-summary").textContent = `${graph.nodes.length} nodes · ${graph.edges.length} relationships`;
   renderGraph();
   $("graph-nodes").innerHTML = graph.nodes.map((node) => `<span><small>${safe(node.kind)}</small>${safe(node.label)}</span>`).join("");
   $("graph-list").innerHTML = graph.edges.map((edge) => `<div class="graph-edge"><span>${safe(nodeName(edge.source))}</span><span class="graph-edge-kind">${safe(edge.kind)}${edge.amount == null ? "" : ` · ${number(edge.amount)}`}</span><span>${safe(nodeName(edge.destination))}</span></div>`).join("");
-  listEmpty("graph-list", graph.edges.length, "还没有关系。创建合约或发生账本事件后会显示在这里。");
+  listEmpty("graph-list", graph.edges.length, "No relationships yet. They will appear after a contract or ledger event.");
   updateTimestamp();
 }
 function updateTimestamp() {
-  $("updated").textContent = `更新于 ${new Intl.DateTimeFormat(I18n.language === "en" ? "en-US" : "zh-CN", { timeStyle: "medium" }).format(new Date())}`;
+  $("updated").textContent = `Updated at ${new Intl.DateTimeFormat("en-US", { timeStyle: "medium" }).format(new Date())}`;
 }
 function renderEvents() {
-  const events = (state.ledger?.events || []).filter((event) => event.id === focusedEventId || $("event-filter").value === "ALL" || event.kind === $("event-filter").value).slice().reverse();
-  $("event-list").innerHTML = events.map((event) => `<article class="token-row event-row ${event.id === focusedEventId ? "is-focused" : ""}" data-event-id="${safe(event.id)}"><div><strong>#${event.sequence} ${safe(kindName[event.kind] || event.kind)}</strong><small>${safe(event.id)} · ${safe(event.taskId || "无任务")}</small><p>${["FREEZE", "RELEASE"].includes(event.kind) ? `持有人 ${safe(event.sourceId)} · 标签 ${safe(event.destinationId)}` : `${safe(event.sourceId || "金库")} → ${safe(event.destinationId || "无目标")}`}${event.contractId ? ` · 合约 ${safe(event.contractId)}` : ""}</p><details><summary>事件详情</summary><p>证据键：${safe(event.evidenceKey || "无")}<br>备注：${safe(event.note || "无")}</p></details></div><strong class="event-amount">${number(event.amountExact ?? event.amount)}</strong></article>`).join("");
-  listEmpty("event-list", events.length, "当前筛选下没有事件。");
+  const events = (state.ledger?.events || []).filter((event) => $("event-filter").value === "ALL" || event.kind === $("event-filter").value).slice().reverse();
+  $("event-list").innerHTML = events.map((event) => `<article class="token-row event-row ${event.id === focusedEventId ? "is-focused" : ""}" data-event-id="${safe(event.id)}"><div><strong>#${event.sequence} ${safe(kindName[event.kind] || event.kind)}</strong><small>${safe(event.id)} · ${safe(event.taskId || "No task")}</small><p>${["FREEZE", "RELEASE"].includes(event.kind) ? `Holder ${safe(event.sourceId)} · Tag ${safe(event.destinationId)}` : `${safe(event.sourceId || "Treasury")} → ${safe(event.destinationId || "No destination")}`}${event.contractId ? ` · Contract ${safe(event.contractId)}` : ""}</p><details><summary>Event details</summary><p>Evidence key: ${safe(event.evidenceKey || "None")}<br>Note: ${safe(event.note || "None")}</p></details></div><strong class="event-amount">${number(event.amountExact ?? event.amount)}</strong></article>`).join("");
+  listEmpty("event-list", events.length, "No events match the current filter.");
   if (focusedEventId) requestAnimationFrame(() => document.querySelector(".event-row.is-focused")?.scrollIntoView({ block: "center" }));
 }
 function renderFreezeOptions() {
@@ -153,56 +166,32 @@ function renderFreezeOptions() {
   selectOptions("#mint-event", entries);
   $("freeze-form").querySelector('button[type="submit"]').disabled = state.busy || !entries.length;
 }
-async function loadPreview() {
-  const id = $("legacy-project").value;
-  if (!id) { $("migration-preview").textContent = "没有可迁移的旧项目。"; return; }
-  try {
-    const view = await request(`/api/projects/${encodeURIComponent(id)}/token-view`);
-    $("migration-preview").textContent = `预计迁移 ${view.events.filter((event) => event.kind === "MINT").length} 条贡献；跳过 ${view.skipped.length} 条。旧项目团队总分 ${number(view.oldTeamTotal)}。`;
-  } catch (error) { $("migration-preview").textContent = `无法读取迁移预览：${error.message}`; }
-  $("migrate").disabled = !id;
-}
-async function fillProjectDefaults(id) {
-  const current = state.projects.find((project) => project.id === id);
-  if (!current) return;
-  const form = $("create-project");
-  form.elements.id.value = current.id;
-  form.elements.name.value = current.name;
-  form.elements.treasury_id.value = `${current.id}-treasury`;
-  try {
-    const dashboard = await request(`/api/projects/${encodeURIComponent(id)}/dashboard`);
-    if ($("legacy-project").value === id) form.elements.member_ids.value = dashboard.members.map((member) => member.id).join("\n");
-  } catch (error) { message(`成员读取失败：${error.message}`, true); }
-}
 async function refresh() {
   if (state.busy) return;
   clearMessages(); setBusy(true);
   try {
     state.projects = await request("/api/projects");
-    selectOptions("#legacy-project", state.projects.map((project) => [project.id, project.name]));
-    let ledger;
-    try { ledger = await request("/api/token/ledger"); }
-    catch (error) {
-      if (!String(error.message).startsWith("unknown token ledger")) throw error;
-      state.ledger = null; $("workspace").hidden = true; $("setup").hidden = false;
-      $("project-name").textContent = "尚未启用 Token 账本";
-      const selected = localStorage.getItem("contribution-project");
-      if (state.projects.some((project) => project.id === selected)) $("legacy-project").value = selected;
-      await fillProjectDefaults($("legacy-project").value);
-      await loadPreview();
-      return;
+    const preferred=localStorage.getItem("contribution-project");
+    state.projectId=state.projects.some((item)=>item.id===preferred)?preferred:(state.projects[0]?.id || "");
+    selectOptions("#token-project-select", state.projects.map((project) => [project.id, project.name]));
+    $("token-project-select").value=state.projectId;
+    if(!state.projectId){state.ledger=null;$("workspace").hidden=true;$("setup").hidden=false;$("ledger-state-copy").textContent="No projects are available. Create a project in the Project Dashboard first.";$("retry-ledger").disabled=true;return;}
+    localStorage.setItem("contribution-project",state.projectId);
+    const status=await request(tokenApi("status"));
+    if(status.state!=="READY"){
+      state.ledger=null;$("workspace").hidden=true;$("setup").hidden=false;$("project-name").textContent=projectName(state.projectId);$("ledger-state-copy").textContent="The ledger is waiting for initialization. The project and member relationships are saved; you can retry.";$("retry-ledger").disabled=false;return;
     }
+    const ledger=await request(tokenApi("ledger"));
     state.ledger = ledger;
-    const [graph, contracts, tasks, debts] = await Promise.all([request("/api/token/graph"), request("/api/token/contracts"), request("/api/token/tasks"), request("/api/token/debts")]);
+    const optional = (path) => request(tokenApi(path)).catch((error) => { if (error.status===403) return []; throw error; });
+    const [graph, contracts, tasks, debts] = await Promise.all([request(tokenApi("graph")), optional("contracts"), request(tokenApi("tasks")), optional("debts")]);
     state.graph = graph; state.contracts = contracts; state.tasks = tasks; state.debts = debts;
     state.budgets = Object.fromEntries(await Promise.all(tasks.map(async (task) => {
       const id = task.id;
-      return [id, await request(`/api/token/tasks/${encodeURIComponent(id)}/budget`)];
+      return [id, await request(tokenApi(`tasks/${encodeURIComponent(id)}/budget`))];
     })));
     render();
-    const selected = localStorage.getItem("contribution-project");
-    if (selected && selected !== ledger.projectId) message(`当前账本属于 ${ledger.projectId}；项目看板选中的是 ${selected}。`);
-  } catch (error) { message(`读取失败：${error.message}`, true); }
+  } catch (error) { message(`Could not load data: ${actionError(error)}`, true); }
   finally { setBusy(false); }
 }
 function evidence(value) { return value.split(/\n+/).map((part) => part.trim()).filter(Boolean); }
@@ -216,34 +205,34 @@ async function mutate(path, body, label, form) {
     if (form) form.reset();
     setBusy(false);
     await refresh();
-    message(label + (result?.skipped?.length ? `；跳过 ${result.skipped.length} 条` : ""));
+    message(label + (result?.skipped?.length ? `; skipped ${result.skipped.length}` : ""));
     try { localStorage.setItem("contribution-graph-update", String(Date.now())); } catch { /* Manual refresh works. */ }
-  } catch (error) { message(saved ? `${label}已保存，但刷新失败：${error.message}` : `操作失败：${error.message}`, true); }
+  } catch (error) { message(saved ? `${label} saved, but refresh failed: ${actionError(error)}` : `Action failed: ${actionError(error)}`, true); }
   finally { setBusy(false); }
 }
 function values(form) { return Object.fromEntries(new FormData(form)); }
-for (const [id, path] of [["add-task", "/api/token/tasks"], ["mint-form", "/api/token/mint"], ["transfer-form", "/api/token/transfer"], ["contract-form", "/api/token/contracts"]]) {
+for (const [id, path] of [["add-task", "tasks"], ["mint-form", "mint"], ["transfer-form", "transfer"], ["contract-form", "contracts"]]) {
   $(id).addEventListener("submit", (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const body = values(form);
     if ("evidence_hashes" in body) body.evidence_hashes = evidence(body.evidence_hashes);
-    if (body.evidence_hashes?.length === 0) { message("请填写至少一个证据标识。", true); return; }
-    if (id === "contract-form" && body.principal_id === body.contractor_id) { message("委托成员与承接成员不能相同。", true); return; }
-    if (id === "transfer-form" && body.source_id === body.destination_id) { message("来源和目标不能相同。", true); return; }
-    mutate(path, body, "操作已保存。", form);
+    if (body.evidence_hashes?.length === 0) { message("Enter at least one evidence ID.", true); return; }
+    if (id === "contract-form" && body.principal_id === body.contractor_id) { message("The principal and contractor must be different.", true); return; }
+    if (id === "transfer-form" && body.source_id === body.destination_id) { message("The source and destination must be different.", true); return; }
+    mutate(tokenApi(path), body, "Action saved.", form);
   });
 }
 $("task-list").addEventListener("submit", (event) => {
   if (!event.target.matches(".cap-form")) return;
   event.preventDefault();
   const form = event.target;
-  mutate(`/api/token/tasks/${encodeURIComponent(form.dataset.id)}/cap`,
-    { mint_cap: form.elements.mint_cap.value }, "任务铸币上限已更新。");
+  mutate(tokenApi(`tasks/${encodeURIComponent(form.dataset.id)}/cap`),
+    { mint_cap: form.elements.mint_cap.value }, "Task mint cap updated.");
 });
 $("debt-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-collect]");
-  if (button) mutate(`/api/token/debts/${encodeURIComponent(button.dataset.collect)}/collect`, {}, "追偿已处理。");
+  if (button) mutate(tokenApi(`debts/${encodeURIComponent(button.dataset.collect)}/collect`), {}, "Recovery processed.");
 });
 $("mint-form").elements.contribution_id.addEventListener("change", async (event) => {
   const id = event.target.value.trim();
@@ -251,33 +240,36 @@ $("mint-form").elements.contribution_id.addEventListener("change", async (event)
   try {
     const detail = await request(`/api/contributions/${encodeURIComponent(id)}`);
     const item = detail.contribution;
-    if (!["VERIFIED", "RESOLVED"].includes(item.status)) throw new Error("此贡献尚未通过审核");
+    if (!["VERIFIED", "RESOLVED"].includes(item.status)) throw new Error("This contribution has not been reviewed.");
     const form = $("mint-form");
     form.elements.event_id.value = detail.tokenMintEventId;
     form.elements.task_id.value = item.task_id;
     form.elements.recipient_id.value = item.contributor_id;
     form.elements.amount.value = detail.currentScoreExact;
     form.elements.evidence_hashes.value = `legacy:${id}`;
-  } catch (error) { message(`读取贡献失败：${error.message}`, true); }
+  } catch (error) { message(`Could not load contribution: ${error.message}`, true); }
 });
-$("create-project").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const body = values(form);
-  body.member_ids = evidence(body.member_ids);
-  mutate("/api/token/project", body, "账本已创建。", form);
+$("retry-ledger").addEventListener("click", () => mutate(tokenApi("setup/retry"), {}, "Project ledger initialized."));
+$("token-project-select").addEventListener("change", (event) => {
+  state.projectId=event.target.value;
+  localStorage.setItem("contribution-project",state.projectId);
+  refresh();
 });
-$("migrate").addEventListener("click", () => mutate(`/api/token/migrate?project_id=${encodeURIComponent($("legacy-project").value)}`, {}, "历史贡献已迁移。"));
-$("sync-legacy").addEventListener("click", () => mutate("/api/token/sync", {}, "项目成员与任务已同步。"));
-$("reconcile").addEventListener("click", () => mutate("/api/token/reconcile", {}, "已检查并补同步贡献。"));
-$("legacy-project").addEventListener("change", async () => {
-  await fillProjectDefaults($("legacy-project").value);
-  await loadPreview();
-});
+$("sync-legacy").addEventListener("click", () => mutate(tokenApi("sync"), {}, "Project members and tasks synced."));
+$("reconcile").addEventListener("click", () => mutate(tokenApi("reconcile"), {}, "Contributions checked and reconciled."));
 $("contract-list").addEventListener("click", (event) => {
   const advance = event.target.closest("[data-next]");
   const settle = event.target.closest("[data-settle]");
-  if (advance) mutate(`/api/token/contracts/${encodeURIComponent(advance.dataset.contract)}/advance`, { status: advance.dataset.next }, "合约状态已更新。");
+  const approve = event.target.closest("[data-approve]");
+  const dispute = event.target.closest("[data-dispute]");
+  const freeze = event.target.closest("[data-freeze-contract]");
+  if (advance) mutate(tokenApi(`contracts/${encodeURIComponent(advance.dataset.contract)}/advance`), { status: advance.dataset.next }, "Contract status updated.");
+  if (approve) mutate(tokenApi(`contracts/${encodeURIComponent(approve.dataset.approve)}/approve`), { note: "Independently approved through the workspace" }, "Independent approval recorded.");
+  if (dispute) {
+    const reason = window.prompt("Enter the dispute reason");
+    if (reason?.trim()) mutate(tokenApi(`contracts/${encodeURIComponent(dispute.dataset.dispute)}/dispute`), { reason: reason.trim() }, "Dispute recorded.");
+  }
+  if (freeze) mutate(tokenApi(`contracts/${encodeURIComponent(freeze.dataset.freezeContract)}/freeze`), { reason: "Frozen for dispute settlement" }, "Contract payment frozen.");
   if (settle) {
     const form = [...document.querySelectorAll(".settle-form")].find((item) => item.dataset.id === settle.dataset.settle);
     if (form) { form.hidden = !form.hidden; if (!form.hidden) form.querySelector("input").focus(); }
@@ -289,9 +281,21 @@ $("contract-list").addEventListener("submit", (event) => {
   const form = event.target;
   const body = values(form);
   body.evidence_hashes = evidence(body.evidence_hashes);
-  body.approver_ids = [body.approver_ids];
-  if (!body.evidence_hashes.length || !body.approver_ids[0]) { message("请填写证据和独立批准成员。", true); return; }
-  mutate(`/api/token/contracts/${encodeURIComponent(form.dataset.id)}/settle`, body, "合约已结算。");
+  if (!body.evidence_hashes.length) { message("Enter settlement evidence.", true); return; }
+  mutate(tokenApi(`contracts/${encodeURIComponent(form.dataset.id)}/settle`), body, "Contract settled.");
+});
+$("contract-list").addEventListener("change", (event) => {
+  if (event.target.matches('.contract-resolve-form [name="outcome"]')) {
+    event.target.form.querySelector(".refund-amount-field").hidden = event.target.value !== "SPLIT";
+  }
+});
+$("contract-list").addEventListener("submit", (event) => {
+  if (!event.target.matches(".contract-resolve-form")) return;
+  event.preventDefault();
+  const form = event.target;
+  const body = values(form);
+  if (body.outcome !== "SPLIT") delete body.refund_amount;
+  mutate(tokenApi(`contracts/${encodeURIComponent(form.dataset.id)}/resolve`), body, "Final dispute resolution recorded.");
 });
 $("event-filter").addEventListener("change", renderEvents);
 $("freeze-action").addEventListener("change", renderFreezeOptions);
@@ -300,11 +304,11 @@ $("freeze-form").addEventListener("submit", (event) => {
   const form = event.currentTarget;
   const sequence = Number(form.elements.sequence.value);
   const note = form.elements.note.value.trim();
-  if (!sequence || !note) { message("请选择铸币事件并填写原因或说明。", true); return; }
+  if (!sequence || !note) { message("Select a mint event and enter a reason or note.", true); return; }
   const mint = state.ledger.events.find((item) => item.sequence === sequence);
   const action = form.elements.action.value;
   const body = { sequences: [sequence], ...(action === "freeze" ? { reason: note } : { note, tag: mint.freezeTag }) };
-  mutate(`/api/token/${action}`, body, action === "freeze" ? "铸币已冻结。" : "铸币已释放。");
+  mutate(tokenApi(action), body, action === "freeze" ? "Mint frozen." : "Mint released.");
 });
 $("refresh").addEventListener("click", refresh);
 window.addEventListener("storage", (event) => {

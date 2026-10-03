@@ -16,23 +16,22 @@ from migrate_token_ledger import migrate_project
 from token_engine import TokenProject, TokenTask, ValueType
 from token_store import TokenStore
 from dashboard_server import create_app
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as BareTestClient
+from test_auth_support import AuthenticatedClient
 
 
 class AdversarialFixTests(unittest.TestCase):
-    def test_token_writes_need_admin_key_and_nonfinite_json_is_422(self):
+    def test_token_writes_need_session_and_nonfinite_json_is_422(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            client = TestClient(create_app(root / "data.sqlite3", root / "token.sqlite3",
-                                           token_admin_key="secret"))
+            app = create_app(root / "data.sqlite3", root / "token.sqlite3")
+            client = AuthenticatedClient(app)
+            anonymous = BareTestClient(app)
             body = {"id": "p", "name": "Project", "treasury_id": "treasury", "member_ids": ["alice"]}
-            self.assertEqual(client.post("/api/token/project", json=body).status_code, 403)
-            self.assertEqual(client.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 403)
-            disabled = TestClient(create_app(root / "other.sqlite3", root / "other-token.sqlite3",
-                                             token_admin_key=""))
-            self.assertEqual(disabled.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 503)
+            self.assertEqual(anonymous.post("/api/token/project", json=body).status_code, 401)
+            self.assertEqual(anonymous.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 401)
             self.assertEqual(client.post("/api/token/project", json=body,
-                                         headers={"X-Token-Admin-Key": "secret"}).status_code, 201)
+                                         headers={"X-Token-Admin-Key": "ignored"}).status_code, 201)
             self.assertEqual(client.post("/api/token/tasks", content=b'{"id":"t","name":"T","value_type":"CORE","mint_cap":NaN,"acceptance_criteria":"done"}',
                                          headers={"Content-Type": "application/json", "X-Token-Admin-Key": "secret"}).status_code, 422)
             too_large = client.post("/api/token/tasks", json={
@@ -55,36 +54,41 @@ class AdversarialFixTests(unittest.TestCase):
                                        support_value=7, helped_member_id="a")
             token = TokenStore(token_path, TokenProject("p", "Project", "treasury", ("a", "b", "c")))
             token.add_task(TokenTask("t", "p", "Task", ValueType.CORE, 10, "Done"))
-            client = TestClient(create_app(legacy_path, token_path, token_admin_key="secret"),
+            client = AuthenticatedClient(create_app(legacy_path, token_path),
                                 headers={"X-Token-Admin-Key": "secret"})
             confirm = client.post("/api/contributions/help/reviews",
                                   json={"reviewer_id": "c", "decision": "CONFIRM"})
             self.assertEqual(confirm.status_code, 200, confirm.text)
-            self.assertEqual(TokenStore(token_path).balance("b"), 7)
+            self.assertEqual(client.get("/api/token/ledger").json()["balances"]["b"], 7)
             dispute = client.post("/api/contributions/help/reviews",
                                   json={"reviewer_id": "c", "decision": "DISPUTE", "note": "recheck"})
             self.assertEqual(dispute.status_code, 200, dispute.text)
-            self.assertEqual(TokenStore(token_path).balance("b"), 0)
+            self.assertEqual(client.get("/api/token/ledger").json()["balances"]["b"], 0)
             resolve = client.post("/api/contributions/help/resolve",
                                   json={"resolved_by": "c", "resolution": "three points", "support_value": 3})
             self.assertEqual(resolve.status_code, 200, resolve.text)
-            self.assertEqual(TokenStore(token_path).balance("b"), 3)
-            self.assertEqual(TokenStore(token_path).total_supply(), 3)
+            self.assertEqual(client.get("/api/token/ledger").json()["balances"]["b"], 3)
+            self.assertEqual(client.get("/api/token/ledger").json()["totalSupply"], 3)
             ContributionStore(legacy_path).submit_contribution(
                 "p", "help2", "b", "t", "SUPPORT", "Helped a again",
                 support_value=7, helped_member_id="a",
             )
-            TokenStore(token_path).set_mint_cap("t", 20)
-            self.assertEqual(client.post("/api/contributions/help2/reviews",
-                                         json={"reviewer_id": "c", "decision": "CONFIRM"}).status_code, 200)
-            TokenStore(token_path).transfer("spent", "b", "c", 10, "t", ["spent-proof"])
+            self.assertEqual(client.post("/api/token/tasks/t/cap", json={"mint_cap": 20}).status_code, 200)
+            second = client.post("/api/contributions/help2/reviews",
+                                 json={"reviewer_id": "c", "decision": "CONFIRM"})
+            self.assertEqual(second.status_code, 200, second.text)
+            spent = client.post("/api/token/transfer", json={
+                "event_id": "spent", "source_id": "b", "destination_id": "c",
+                "amount": 10, "task_id": "t", "evidence_hashes": ["spent-proof"],
+            })
+            self.assertEqual(spent.status_code, 201, spent.text)
             client.post("/api/contributions/help2/reviews",
                         json={"reviewer_id": "c", "decision": "DISPUTE", "note": "recheck"})
             second = client.post("/api/contributions/help2/resolve",
                                  json={"resolved_by": "c", "resolution": "three points", "support_value": 3})
             self.assertEqual(second.status_code, 200, second.text)
             self.assertEqual(second.json()["tokenResolved"]["correction"]["debtExact"], "4")
-            self.assertEqual(TokenStore(token_path).balance("b"), 0)
+            self.assertEqual(client.get("/api/token/ledger").json()["balances"]["b"], 0)
             self.assertEqual(client.get("/api/token/debts").json()[0]["remainingExact"], "4")
 
     def test_incomplete_file_can_be_initialized(self):

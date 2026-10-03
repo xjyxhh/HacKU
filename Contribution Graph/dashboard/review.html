@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,20 +9,26 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/review.css">
   <script src="/i18n.js" defer></script>
+  <script src="/auth.js" defer></script>
   <script src="/review.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳转到主要内容</a>
   <div class="shell">
+    <nav class="page-nav" aria-label="页面导航">
+      <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">CG</span><span>Contribution Graph</span></div><p class="sidebar-label">审核空间</p>
+      <a href="/">项目看板</a><a href="#queue-title" aria-current="page">贡献审核</a><a href="/token.html">Token 工作台</a>
+      <div class="sidebar-divider"></div><details class="settings"><summary>设置</summary><div class="settings-menu"><label for="language-select">语言</label><select id="language-select" aria-label="界面语言"><option value="en" selected>English</option><option value="zh">中文</option></select></div></details>
+    </nav>
     <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">CG</span><span>Contribution Graph</span></div>
-      <div class="top-actions"><label>当前项目 <select id="review-project" aria-label="切换审核项目"></select></label><a class="nav-link" href="/">项目看板</a><a class="nav-link" href="/token.html">Token 工作台</a><details class="settings"><summary>设置</summary><div class="settings-menu"><label for="language-select">语言</label><select id="language-select" aria-label="界面语言"><option value="zh">中文</option><option value="en">English</option></select></div></details><button id="refresh" type="button">刷新数据 ↗</button></div>
+      <div class="top-actions"><label>当前项目 <select id="review-project" aria-label="切换审核项目"></select></label><button id="refresh" type="button">刷新数据 ↗</button></div>
     </header>
     <main id="main-content" tabindex="-1">
       <section class="intro">
         <div><p class="kicker">证据 / 同伴验证 / 争议处理</p><h1>贡献审核</h1><p class="intro-copy" id="project-name">正在读取项目…</p></div>
-        <div class="actor-box"><label for="actor">当前操作成员</label><select id="actor" disabled></select><small>演示身份选择，尚未接入登录</small></div>
+        <div class="actor-box"><label for="actor">当前操作成员</label><select id="actor" disabled></select><small>身份由登录会话确定</small></div>
       </section>
+      <aside class="fairness-note"><div><h2>Review and dispute rules</h2><p>Reviewers cannot verify their own contributions. Related scores are paused during disputes, which are resolved by a non-party.</p></div><a href="/fairness.html">Read rules and boundaries</a></aside>
       <div id="error" class="error" role="alert" hidden></div>
       <div id="success" class="notice" role="status" aria-live="polite" hidden></div>
       <section class="summary" aria-label="审核摘要">
@@ -33,7 +39,7 @@
       </section>
       <div class="review-grid">
         <section class="panel queue-panel" aria-labelledby="queue-title">
-          <div class="section-head"><h2 id="queue-title">贡献列表</h2><label class="filter">状态<select id="status-filter"><option value="ALL">全部</option><option value="PENDING">待验证</option><option value="VERIFIED">已验证</option><option value="DISPUTED">争议中</option><option value="RESOLVED">已解决</option></select></label></div>
+          <div class="section-head"><h2 id="queue-title">贡献列表</h2><label class="filter">状态<select id="status-filter"><option value="ALL">全部</option><option value="PENDING">待验证</option><option value="VERIFIED">已验证</option><option value="DISPUTED">争议中</option><option value="RESOLVED">已解决</option><option value="WITHDRAWN">已撤回</option></select></label></div>
           <div id="contribution-list" class="queue"></div>
           <p id="queue-empty" class="empty" hidden>暂无符合条件的贡献。</p>
         </section>

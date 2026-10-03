@@ -1,5 +1,14 @@
 # 修改日志
 
+## 2026-10-03 · 完成成员撤回与项目生命周期 / Withdrawal and project lifecycle
+
+- 新增可重复建表的生命周期、成员状态、撤回申请、退出申请、审计事件与 outbox 表。
+- 增加贡献撤回申请/审批、成员退出预览/申请/审批，以及项目归档预览、归档、恢复接口；归档只隐藏并封锁写入，不物理删除。
+- 看板对已撤回贡献显示零有效分数并保留历史记录，根页面不再硬编码 `fintech`。
+- 每个项目使用 SHA-256 命名的独立 Token 账本；旧单账本经 SQLite Backup API 迁移并保留原文件。/ Each project uses an isolated SHA-256 named ledger; the old ledger is copied and retained.
+- 撤回和退出的 Token 调和会回收可用余额、登记具名债务，并允许管理员幂等重试。/ Withdrawal and exit recover available Tokens, record named debt, and support idempotent administrator retries.
+- 看板提供退出及归档预览、待调和账务和已归档项目恢复；Token 工作台跟随当前项目。/ The dashboard shows exit and archive previews, pending accounting, and recovery controls; the Token workbench follows the selected project.
+
 ## 2026-10-03 · 项目说明与使用流程
 
 - 扩充根目录 README：说明项目定位、看板与审核流程、Token 工作台、首次启动、管理员密钥、数据备份和测试方法。
@@ -59,3 +68,10 @@
 ## 2026-10-02 · 仓库初始化（`237c9b1`）
 
 - 创建仓库与初始 README。
+# 未发布
+
+- 增加成员身份表、一次性 scrypt 引导文件命令、会话 Cookie 与 CSRF 校验、成员邀请兑换及项目管理员任命接口。
+- 为 PocketBay 部署启用 Secure Cookie；登录与邀请兑换按服务端来源限速，并修复 `/api/` 尾斜线路径。
+- 三个前端页面改用登录会话请求，移除 `TOKEN_ADMIN_KEY` 浏览器提示；增加项目邀请入口、密码兑换页和公平规则说明页。
+- 增加真实 `contract_approvals`、合约 `RESOLVED` 状态迁移、争议冻结、追加式 `REFUND` / `SPLIT` 账本和结案记录；退款不增加铸币量。
+- 增加多案例演示脚本、认证与合约终局 HTTP/持久化测试，并更新公平规则和融合指南。

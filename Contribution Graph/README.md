@@ -1,5 +1,15 @@
 # Contribution Graph：完整数据流程
 
+## 贡献撤回与项目归档 / Withdrawal and archival
+
+已提供撤回申请与独立成员决定 API、退出预览和申请 API、站点管理员项目归档预览及归档/恢复 API。撤回历史保留，撤回后看板有效分数为 0；归档可恢复且不物理删除。/ Withdrawal requests and independent decisions, exit preview/request endpoints, and administrator archive preview/archive/restore endpoints are available. Withdrawal history is retained and its dashboard effective score becomes zero. Archival is recoverable and retains records.
+
+项目账本位于 `token-ledgers/<项目 ID 的完整 SHA-256>.sqlite3`；旧 `token.sqlite3` 保留为迁移备份，旧 `/api/token/...` 只指向原项目。撤回账务先回收可用 Token，不足部分登记 `withdraw:<贡献 ID>` 债务；成员退出再清偿已有债务并将余额转入该项目金库。归档会保存余额与债务预览，待处理 outbox 必须先调和。/ Project ledgers use full SHA-256 filenames under `token-ledgers/`. The old ledger remains a migration backup and legacy routes stay bound to its original project. Withdrawal recovers available Tokens and records a named debt for any shortfall. Exit then collects outstanding debt and sweeps remaining balance to the project treasury. Archival stores a debt snapshot and requires all outbox work to finish first.
+
+看板的“项目生命周期”区显示退出与归档预览、待调和账务、已归档项目和恢复入口；Token 工作台根据项目选择器读取对应账本。导出 JSON 会收集所有项目账本，导入新目录时恢复全部账本。/ The dashboard lifecycle section exposes exit and archive previews, pending accounting, archived projects, and restore controls. The Token workbench follows the selected project. JSON export and import include every project ledger.
+
+停写后可用 `.venv/bin/python backup_restore.py data.sqlite3 /tmp/hacku-backup-YYYYMMDD` 备份贡献库、旧账本和所有项目账本；脚本会对每份副本执行 `integrity_check`，复制到独立测试目录并读取项目、事件、余额与债务。目标目录必须是新目录。/ After stopping writes, run the command above to back up all databases with SQLite Backup API and rehearse restoration. Use a fresh destination directory, then inspect `manifest.json` before deployment or rollback.
+
 本文件夹包含本地 SQLite 数据保存、贡献评分、验证与争议处理，以及 Dashboard / Graph 网站。网站和命令行默认共用 `data.sqlite3`，统一从 `http://127.0.0.1:8000` 访问。以下命令均在本文件夹中运行：
 
 ```sh
@@ -36,7 +46,6 @@ python3 contribution_store.py --db workflow.sqlite3 record c4
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-export TOKEN_ADMIN_KEY='请替换为仅管理员知晓的长随机密钥'
 .venv/bin/python dashboard_server.py
 ```
 
@@ -69,14 +78,7 @@ python3 contribution_store.py review c3 alice CONFIRM
 
 POST 请求使用 JSON 请求体，字段名称与 `contribution_store.py` 中相应方法一致；具体字段和枚举值可在 `/docs` 查看。例如确认一条待验证贡献：
 
-```sh
-curl -X POST http://127.0.0.1:8000/api/contributions/c3/reviews \
-  -H 'Content-Type: application/json' \
-  -H "X-Token-Admin-Key: $TOKEN_ADMIN_KEY" \
-  -d '{"reviewer_id":"alice","decision":"CONFIRM"}'
-```
-
-服务默认仅监听本机。写入由统一管理员密钥保护，当前接口仍使用请求中的成员 ID，没有按成员登录的身份验证；若要开放给外部用户，需先加入成员认证，并评估使用服务数据库。
+服务默认仅监听本机。写操作由成员会话保护，审核操作者由当前登录成员确定；项目管理与 Token 操作要求管理员权限。
 
 ## 数据快照与备份
 
@@ -98,7 +100,7 @@ python3 import_json.py data.json data.sqlite3
 
 ## B：贡献审核页面
 
-启动服务后打开 `http://127.0.0.1:8000/review.html`，或点击看板顶部的“贡献审核”。选择当前操作成员和贡献，即可添加证据、确认、预览并调整分数、提出争议、解决争议，以及查看历史记录。成员下拉框是演示身份选择，没有登录认证。
+启动服务后打开 `http://127.0.0.1:8000/review.html`，或点击看板顶部的“贡献审核”。登录成员可以添加证据、审核他人的贡献、提出争议或解决争议；页面显示的操作成员来自当前会话。
 
 - `PENDING`：其他成员可以确认或调整；项目成员可以填写原因提出争议。
 - `VERIFIED`：可以提出争议。
@@ -132,7 +134,7 @@ python3 import_json.py data.json data.sqlite3
 
 新增接口：`GET /api/token/tasks`、`POST /api/token/migrate?project_id=...`、`POST /api/token/freeze` 和 `POST /api/token/release`。冻结和释放请求接受 `sequences` 数组，分别使用 `reason` 或 `note`，可选 `tag`。迁移目标文件已存在时拒绝覆盖。已验证贡献不能完整迁移时，迁移会报错，避免留下部分账本。
 
-写入前必须设置 `TOKEN_ADMIN_KEY` 环境变量。所有会修改数据的 API 都要带 `X-Token-Admin-Key`，包括旧项目录入和审核，因为这些数据会进入 Token 账本；网页在首次收到 403 时提示输入，密钥只保存在当前浏览器会话中。未设置密钥时写入返回 503。密钥授予全部账本管理权限，包括设定 `mint_cap`、铸币和指定转账来源；应只交给可信管理员。`mint_cap` 是业务预算，不单独构成安全边界。金额响应保留原有数字字段供展示，并提供 `*Exact` 字符串字段供精确对账。
+写操作使用成员会话和 CSRF 校验。项目写操作要求项目管理员；Token 写操作要求对应项目管理员。初始管理员通过 `manage_auth.py bootstrap-seed` 创建一次性 scrypt 哈希引导文件，不提供公开注册。项目管理员可为已加入项目且尚无账号的成员创建 48 小时邀请；兑换链接只显示一次，由管理员自行交付。`TOKEN_ADMIN_KEY` 与 `X-Token-Admin-Key` 已不再作为认证方式。金额响应保留 `*Exact` 字符串字段供精确对账。公平规则和限制见 `/fairness.html`。
 
 匹配项目的持久账本是看板上的成员认定来源；旧分保留为对照。旧贡献审核与 Token 账本分处两个 SQLite 文件，不能作为一笔跨库事务提交。审核会先检查预算和独立审批人；临时写入失败时，看板的 `tokenRecognition.pendingContributions` 列出未补铸记录，管理员可调用 `POST /api/token/reconcile` 重试。手工铸币填写 `contribution_id` 时，后端要求贡献已审核且接收人、金额、任务和证据标识与贡献一致；留空表示独立 Token 工作。
 
@@ -194,6 +196,18 @@ python3 token_projection_demo.py --db walkthrough.sqlite3
 ```
 
 把既有贡献只读投影成 Token 账本，输出 `balances`、`contracts`、`events`、`graph`、`skipped` 和 `assumptions`，不写库、不改表。投影规则、融合陷阱与后续路线见 [融合指南.md](../融合指南.md)。
+
+### 6. 身份、审批与合约终局
+
+写请求必须使用成员会话 Cookie 和 CSRF；项目管理员可为已加入项目、尚无账号的成员创建一次性邀请。第三方成员通过 `/api/token/contracts/{id}/approve` 留下真实批准记录，结算时服务端只读取这些记录。已结算合约可经由争议、冻结、`RELEASE`、`REFUND` 或 `SPLIT` 形成终局；金额与事件记录写入 `token.sqlite3`，不增加铸币总额。部署种子、权限边界和取消语义见根目录 [执行手册](../执行手册-成员登录与争议结算.md) 与 [公平规则](../FAIRNESS.md)。
+
+生成隔离的多案例演示账本：
+
+```sh
+.venv/bin/python seed_token_demo.py /tmp/hacku-token-demo
+```
+
+脚本拒绝覆盖已有 `token.sqlite3`，不读取或修改网站数据库。
 
 ## 检查
 

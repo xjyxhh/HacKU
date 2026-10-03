@@ -5,7 +5,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as BareTestClient
+from test_auth_support import AuthenticatedClient
 
 from contribution_store import ContributionStore
 from dashboard_server import create_app
@@ -32,7 +33,7 @@ class TokenApiTests(unittest.TestCase):
         self.legacy_db = Path(self.tmp.name) / "legacy.sqlite3"
         self.token_db = Path(self.tmp.name) / "token.sqlite3"
         build_legacy(self.legacy_db)
-        self.client = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key="test-key"),
+        self.client = AuthenticatedClient(create_app(self.legacy_db, self.token_db),
                                  headers={"X-Token-Admin-Key": "test-key"})
 
     def tearDown(self):
@@ -50,21 +51,21 @@ class TokenApiTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 201, response.text)
 
-    def test_token_writes_require_admin_key(self):
-        client = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key=""))
+    def test_token_writes_require_a_session(self):
+        client = BareTestClient(create_app(self.legacy_db, self.token_db))
         response = client.post("/api/token/project", json={
             "id": "fintech", "name": "FinTech", "treasury_id": "fintech-treasury",
             "member_ids": ["alice", "bob", "charlie", "david"],
         })
-        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.status_code, 401, response.text)
 
     def test_admin_key_protects_review_that_writes_token_ledger(self):
         self.create_ledger()
-        anonymous = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key="test-key"))
+        anonymous = BareTestClient(create_app(self.legacy_db, self.token_db))
         response = anonymous.post("/api/contributions/core/reviews", json={
             "reviewer_id": "bob", "decision": "CONFIRM",
         })
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
         self.assertEqual(self.client.get("/api/contributions/core").json()["contribution"]["status"], "PENDING")
 
     def test_migrate_from_page_api_preserves_history_and_refuses_overwrite(self):
@@ -302,7 +303,14 @@ class TokenApiTests(unittest.TestCase):
             "verified_mint_value": "60", "evidence_hashes": ["sha:done"],
             "approver_ids": ["alice"],
         })
-        self.assertEqual(response.status_code, 400)  # principal cannot approve
+        self.assertEqual(response.status_code, 409)  # no recorded approval exists yet
+        self.client._login("charlie")
+        self.assertEqual(self.client.post("/api/token/contracts/c1/approve", json={"note": "Independent check"}).status_code, 201)
+        response = self.client.post("/api/token/contracts/c1/settle", json={
+            "verified_mint_value": "60", "evidence_hashes": ["sha:done"],
+            "approver_ids": ["alice"],
+        })
+        self.assertEqual(response.status_code, 403, response.text)
         response = self.client.post("/api/token/contracts/c1/settle", json={
             "verified_mint_value": "60", "evidence_hashes": ["sha:done"],
             "approver_ids": ["charlie"],
@@ -331,7 +339,7 @@ class TokenApiTests(unittest.TestCase):
             "verified_mint_value": "20", "evidence_hashes": ["sha:disputed"],
             "approver_ids": ["charlie"],
         })
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
         self.assertEqual(self.client.get("/api/token/ledger").json()["totalSupply"], 0.0)
         for status in ("DELIVERED", "VERIFIED"):
             response = self.client.post("/api/token/contracts/disputed/advance", json={"status": status})
@@ -531,7 +539,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_migration_preserves_balances_and_conservation(self):
         build_legacy(self.legacy_db)
-        client = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key="test-key"),
+        client = AuthenticatedClient(create_app(self.legacy_db, self.token_db),
                             headers={"X-Token-Admin-Key": "test-key"})
         client.post("/api/token/project", json={
             "id": "fintech", "name": "FinTech", "treasury_id": "fintech-treasury",
@@ -558,8 +566,8 @@ class MigrationTests(unittest.TestCase):
         self.assertTrue(report["conservation"])
 
         # The migrated ledger opens standalone and matches the live one.
-        live = TestClient(create_app(self.legacy_db, self.token_db)).get("/api/token/ledger").json()
-        migrated = TestClient(create_app(self.legacy_db, migrated_db)).get("/api/token/ledger").json()
+        live = AuthenticatedClient(create_app(self.legacy_db, self.token_db)).get("/api/token/ledger").json()
+        migrated = AuthenticatedClient(create_app(self.legacy_db, migrated_db)).get("/api/token/ledger").json()
         self.assertEqual(migrated["balances"], live["balances"])
         self.assertEqual(migrated["totalSupply"], live["totalSupply"])
         self.assertEqual(len(migrated["events"]), len(live["events"]))

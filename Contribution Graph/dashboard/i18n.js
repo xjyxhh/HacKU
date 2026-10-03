@@ -2,8 +2,7 @@
 const I18n = (() => {
   const copy = {
     "中文": "Chinese", "设置": "Settings", "语言": "Language", "界面语言": "Interface language",
-    "请输入账本管理员密钥": "Enter the Token Ledger Admin Key",
-    "请输入服务启动时配置的 TOKEN_ADMIN_KEY": "Enter the TOKEN_ADMIN_KEY Configured at Service Startup",
+    "添加管理员": "Add administrator", "确认添加": "Add", "成员登录": "Member login", "成员 ID": "Member ID", "密码": "Password", "登录": "Log in", "退出": "Log out", "取消": "Cancel", "只读访问": "Read-only access", "管理员已添加。": "Administrator added.", "添加管理员失败，请重试。": "Could not add administrator. Please try again.",
     "输入": "Input",
     "跳转到主要内容": "Skip to main content", "项目看板": "Project Dashboard",
     "Contribution Graph | 项目看板": "Contribution Graph | Project Dashboard",
@@ -29,7 +28,7 @@ const I18n = (() => {
     // Review page
     "证据 / 同伴验证 / 争议处理": "Evidence / Peer Review / Disputes",
     "审核摘要": "Review Summary",
-    "当前操作成员": "Acting Member", "演示身份选择，尚未接入登录": "Demo Identity Selector; Sign-In Is Not Connected",
+    "当前操作成员": "Acting Member", "身份由登录会话确定": "Identity comes from the signed-in session",
     "已验证和已解决的贡献": "Verified and Resolved Contributions",
     "确认或调整后开始计分": "Scores Count After Confirmation or Adjustment",
     "解决前暂停计分": "Scoring Paused Until Resolution",
@@ -208,7 +207,9 @@ const I18n = (() => {
     [/^输入：(.+)$/, (_, detail) => `Input: ${detail}`],
     [/^读取贡献失败：(.+)$/, (_, detail) => `Could Not Load Contribution: ${translate(detail)}`]
   ];
-  let language = localStorage.getItem("contribution-language") === "en" ? "en" : "zh";
+  // Always start a fresh page in English. A Chinese selection remains available
+  // for the current page, but is intentionally not restored on the next entry.
+  let language = "en";
   const textSources = new WeakMap();
   const attributeSources = new WeakMap();
   const titleSource = document.title;
@@ -222,7 +223,9 @@ const I18n = (() => {
     for (const [pattern, replacement] of patterns) {
       if (pattern.test(content)) return before + content.replace(pattern, replacement) + after;
     }
-    return value;
+    const keys = Object.keys(copy).filter((key) => key && content.includes(key)).sort((a, b) => b.length - a.length);
+    const translated = keys.reduce((result, key) => result.split(key).join(copy[key]), content);
+    return before + translated + after;
   }
   function ignored(node) {
     return node.parentElement?.closest('[translate="no"], [data-i18n-ignore], script, style');
