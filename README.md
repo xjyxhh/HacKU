@@ -18,6 +18,8 @@ PocketBay 使用 `/data` 持久卷保存贡献与 Token 两份 SQLite 数据库�
 
 部署压缩包可用 `python3 scripts/package_pocketbay.py /tmp/hacku-pocketbay.zip` 生成。脚本仅打包应用源码、页面及数据快照，并将压缩包中的应用目录命名为 `contribution_graph`，以兼容 PocketBay 当前对带空格目录生成的构建路径。
 
+当前 PocketBay 项目尚未接入托管数据库。更新版本时，使用 `python3 scripts/package_pocketbay.py /tmp/hacku-pocketbay.zip --bootstrap-seed 'Contribution Graph/private/hacku-auth-seed.json'`，确保新容器缺少站点管理员时能恢复现有账号。该私有文件已被 Git 忽略，勿提交或公开；接入持久数据库并验证迁移后可停止随包提供引导文件。
+
 ## 功能
 
 - **贡献录入**：在看板中创建或切换项目、添加成员和任务、提交四类贡献；新贡献以「待验证」状态出现，提交后得分为 0。
