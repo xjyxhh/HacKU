@@ -1,6 +1,8 @@
 import tempfile
 import sqlite3
 import os
+import hashlib
+import json
 import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient as BareTestClient
 
 from contribution_store import ContributionStore
 from dashboard_server import create_app
+import dashboard_server
 from test_auth_support import AuthenticatedClient
 
 
@@ -143,6 +146,39 @@ class AuthApiTests(unittest.TestCase):
                                  headers={"Origin": "https://testserver", "X-Forwarded-Proto": "https"})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("Secure", response.headers.get("set-cookie", ""))
+
+    def test_recovery_seed_restores_missing_site_admin_without_changing_existing_admin(self):
+        salt = os.urandom(16)
+        digest = hashlib.scrypt(b"RecoveryPass123", salt=salt, n=2**14, r=8, p=1, dklen=32)
+        private = Path(self.temp.name) / "private"
+        private.mkdir()
+        (private / "hacku-auth-seed.json").write_text(json.dumps({
+            "member_id": "20231118", "salt": salt.hex(), "password_hash": digest.hex(),
+        }), encoding="utf-8")
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO members(id,name) VALUES('20231118','20231118')")
+            conn.execute("UPDATE auth_accounts SET is_site_admin=0")
+        with patch.dict(os.environ, {"POCKETBAY_PRIVATE_DIR": str(private)}):
+            recovered = create_app(self.db, Path(self.temp.name) / "token.sqlite3")
+        with sqlite3.connect(self.db) as conn:
+            row = conn.execute("SELECT is_site_admin,password_hash FROM auth_accounts WHERE member_id='20231118'").fetchone()
+        self.assertEqual(row, (1, digest))
+        login = BareTestClient(recovered).post("/api/auth/login", json={
+            "member_id": "20231118", "password": "RecoveryPass123",
+        }, headers={"Origin": "http://testserver"})
+        self.assertEqual(login.status_code, 200, login.text)
+        with patch.dict(os.environ, {"POCKETBAY_PRIVATE_DIR": str(private)}):
+            create_app(self.db, Path(self.temp.name) / "token.sqlite3")
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM auth_accounts WHERE is_site_admin=1").fetchone()[0], 1)
+
+    def test_pocketbay_imports_snapshot_before_creating_identity_tables(self):
+        fresh = Path(self.temp.name) / "fresh.sqlite3"
+        with patch.dict(os.environ, {"POCKETBAY_DATA_DIR": self.temp.name}), patch.object(dashboard_server, "DEFAULT_DB", fresh):
+            create_app(fresh, Path(self.temp.name) / "fresh-token.sqlite3")
+        with sqlite3.connect(fresh) as conn:
+            self.assertGreater(conn.execute("SELECT count(*) FROM projects").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM auth_accounts").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

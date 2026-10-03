@@ -277,6 +277,9 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
     token_project_context = ContextVar("token_project_id", default=None)
     # Identity tables are additive; business tables and data remain untouched.
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("POCKETBAY_DATA_DIR") and db_path == DEFAULT_DB and not db_path.exists():
+        from import_json import import_json
+        import_json(Path(__file__).with_name("data.json"), db_path)
     with sqlite3.connect(db_path) as auth_conn:
         auth_conn.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
         auth_conn.executescript(Path(__file__).with_name("auth_schema.sql").read_text(encoding="utf-8"))
@@ -293,12 +296,14 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         if auth_conn.execute("PRAGMA user_version").fetchone()[0] < 1:
             auth_conn.execute("PRAGMA user_version = 1")
         seed_path = Path(os.environ.get("POCKETBAY_PRIVATE_DIR", Path(__file__).parent / "private")) / "hacku-auth-seed.json"
-        if seed_path.is_file() and not auth_conn.execute("SELECT 1 FROM auth_accounts LIMIT 1").fetchone():
+        if seed_path.is_file() and not auth_conn.execute("SELECT 1 FROM auth_accounts WHERE is_site_admin=1 LIMIT 1").fetchone():
             seed = json.loads(seed_path.read_text(encoding="utf-8"))
             member_id = str(seed["member_id"]).strip()
             if member_id:
                 auth_conn.execute("INSERT OR IGNORE INTO members(id,name) VALUES(?,?)", (member_id, member_id))
-                auth_conn.execute("INSERT INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1)", (member_id, bytes.fromhex(seed["salt"]), bytes.fromhex(seed["password_hash"])))
+                auth_conn.execute("INSERT INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1) "
+                                  "ON CONFLICT(member_id) DO UPDATE SET salt=excluded.salt, password_hash=excluded.password_hash, is_site_admin=1",
+                                  (member_id, bytes.fromhex(seed["salt"]), bytes.fromhex(seed["password_hash"])))
 
     def auth_session(request):
         token = request.cookies.get("hacku_session", "")
@@ -308,10 +313,6 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         with sqlite3.connect(db_path) as conn:
             row = conn.execute("SELECT s.member_id, s.csrf_hash, a.is_site_admin FROM auth_sessions s JOIN auth_accounts a USING(member_id) WHERE s.token_hash=? AND s.expires_at>?", (digest, int(time.time()))).fetchone()
         return {"member_id": row[0], "csrf_hash": row[1], "site_admin": bool(row[2])} if row else None
-    if os.environ.get("POCKETBAY_DATA_DIR") and db_path == DEFAULT_DB and not db_path.exists():
-        from import_json import import_json
-        import_json(Path(__file__).with_name("data.json"), db_path)
-
     @app.middleware("http")
     async def protect_token_writes(request: Request, call_next):
         length = request.headers.get("content-length", "0")
