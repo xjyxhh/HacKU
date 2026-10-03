@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#103c3d">
   <title>Contribution Graph | 项目看板</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
@@ -12,7 +13,7 @@
   <div class="shell">
     <header class="topbar">
       <div class="brand"><span class="brand-mark" aria-hidden="true">CG</span><span>Contribution Graph</span></div>
-      <div class="top-actions"><label class="project-picker">当前项目 <select id="project-select" aria-label="切换项目"></select></label><details class="settings"><summary>设置</summary><div class="settings-menu"><label for="language-select">语言</label><select id="language-select" aria-label="界面语言"><option value="zh">中文</option><option value="en">English</option></select></div></details><button id="refresh" class="refresh-button" type="button">刷新数据 <span aria-hidden="true">↗</span></button></div>
+      <div class="top-actions"><label class="project-picker">当前项目 <select id="project-select" aria-label="切换项目"></select></label><a class="review-link" href="/review.html">贡献审核</a><details class="settings"><summary>设置</summary><div class="settings-menu"><label for="language-select">语言</label><select id="language-select" aria-label="界面语言"><option value="zh">中文</option><option value="en">English</option></select></div></details><button id="refresh" class="refresh-button" type="button">刷新数据 <span aria-hidden="true">↗</span></button></div>
     </header>
     <nav class="page-nav" aria-label="页面导航"><a href="#overview">总览</a><a href="#entry">录入</a><a href="#graph-panel">关系图</a><a href="#contribution-panel">贡献明细</a></nav>
 

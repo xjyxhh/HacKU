@@ -5,3 +5,5 @@ __pycache__/
 Contribution Graph/*.sqlite3*
 ~$*
 Contribution Graph.zip
+output/
+.playwright-cli/

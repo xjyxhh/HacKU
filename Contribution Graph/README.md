@@ -93,6 +93,34 @@ python3 import_json.py data.json data.sqlite3
 - 按项目、成员、项目成员、任务、贡献、证据、审核、争议的顺序复制数据；迁移前后比较记录数量、贡献状态和成员分数。审核或争议的状态更新及历史记录必须处于同一事务。
 - 当前界面和争议处理按 SQLite 插入顺序读取记录（`rowid`）。迁移历史记录时要保留这个顺序，并在 PostgreSQL 中设置明确的排序列。
 
+## B：贡献审核页面
+
+启动服务后打开 `http://127.0.0.1:8000/review.html`，或点击看板顶部的“贡献审核”。选择当前操作成员和贡献，即可添加证据、确认、预览并调整分数、提出争议、解决争议，以及查看历史记录。成员下拉框是演示身份选择，没有登录认证。
+
+- `PENDING`：其他成员可以确认或调整；项目成员可以填写原因提出争议。
+- `VERIFIED`：可以提出争议。
+- `DISPUTED`：其他成员填写结论并预览最终分数后解决。
+- `RESOLVED`：查看最终结果和处理记录。
+- `IMAGE`、`GITHUB_PR` 等证据保存文本或链接引用，没有文件上传。
+- 调整前先点击“预览分数”；分数实际变化后才能提交调整。确认使用原有提议分值。
+- 页面显示的当前分数、提议分值和调整预览均由后端评分引擎提供。新增 `POST /api/contributions/{contribution_id}/preview` 接口接受 `completion`、`support_value`、`quality`，只计算、不保存。
+- 写入后重新获取贡献详情和项目数据，并通知同源浏览器中已经打开的看板自动刷新。也可以手动点击“刷新数据”。
+
+在 `Contribution Graph/` 中启动读取统一数据库的服务（虚拟环境与依赖安装见上文）：
+
+```sh
+.venv/bin/python dashboard_server.py
+```
+
+如需单独演示，先生成一个不存在的 SQLite 文件，再让 B/C 使用同一份副本：
+
+```sh
+.venv/bin/python seed_dashboard.py output/b-demo.sqlite3
+.venv/bin/python dashboard_server.py --db output/b-demo.sqlite3
+```
+
+详细实现与验收步骤见仓库根目录的 `B-实现说明.md`。
+
 ## 手动操作全套流程
 
 每条命令都使用同一个 `--db walkthrough.sqlite3`。若文件已含同名 ID，请换一个文件名或 ID。

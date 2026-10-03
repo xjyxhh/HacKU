@@ -1,6 +1,6 @@
 const english = {
   "项目看板": "Project Dashboard", "当前项目": "Current project", "切换项目": "Switch project", "设置": "Settings", "语言": "Language", "界面语言": "Interface language",
-  "刷新数据": "Refresh", "页面导航": "Page navigation", "总览": "Overview", "录入": "Add records", "关系图": "Graph", "贡献明细": "Contributions",
+  "刷新数据": "Refresh", "页面导航": "Page navigation", "总览": "Overview", "录入": "Add records", "关系图": "Graph", "贡献明细": "Contributions", "贡献审核": "Review",
   "项目总览": "Project overview", "正在加载项目...": "Loading project...", "查看贡献得分、任务价值，以及成员之间的协作关系。": "Explore contribution scores, task values, and team relationships.", "正在读取数据": "Loading data",
   "项目摘要": "Project summary", "团队总分": "Team score", "已验证与已解决贡献": "Verified and resolved contributions", "项目成员": "Members", "参与贡献": "Contributors", "项目任务": "Tasks", "预设任务价值": "Preset task value", "贡献记录": "Contribution records", "等待数据": "Waiting for data",
   "成员贡献": "Member contributions", "选择成员，查看与他相关的贡献": "Select a member to see related contributions", "暂无成员。": "No members yet.", "任务价值": "Task values", "选择任务，筛选贡献明细": "Select a task to filter contributions", "暂无任务。": "No tasks yet.",
@@ -422,4 +422,9 @@ $("contribution-form").addEventListener("submit", (event) => {
 });
 updateContributionFields();
 setLanguage(language);
+// B publishes a change after a successful write; other dashboard tabs reload the shared data.
+window.addEventListener("storage", (event) => {
+  if (event.key === "contribution-graph-update") refresh();
+});
+window.addEventListener("focus", refresh);
 refresh();

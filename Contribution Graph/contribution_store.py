@@ -321,12 +321,30 @@ class ContributionStore:
         return {
             "contribution": record,
             "task": {"id": task.id, "name": task.name, "taskValue": str(task.task_value)},
+            "currentScore": float(contribution_score(
+                contribution, self._project(contribution.project_id), self.members, self.tasks)),
+            "proposedScore": self.preview_score(contribution_id)["proposedScore"],
             "evidence": [asdict(item) for item in self.evidence.values()
                          if item.contribution_id == contribution_id],
             "verifications": [asdict(item) for item in self.verifications.values()
                               if item.contribution_id == contribution_id],
             "disputes": [asdict(item) for item in self.disputes.values()
                          if item.contribution_id == contribution_id],
+        }
+
+    def preview_score(self, contribution_id, completion=None, support_value=None, quality=None):
+        """Calculate proposed scores on copies, without changing status or saving data."""
+        contribution = self._contribution(contribution_id)
+        project = self._project(contribution.project_id)
+        proposed = replace(contribution, status=ContributionStatus.VERIFIED)
+        updated = replace(proposed, **self._score_changes(completion, support_value, quality))
+        before = contribution_score(proposed, project, self.members, self.tasks)
+        after = contribution_score(updated, project, self.members, self.tasks)
+        return {
+            "currentScore": float(contribution_score(contribution, project, self.members, self.tasks)),
+            "proposedScore": float(before),
+            "updatedScore": float(after),
+            "scoreChanged": before != after,
         }
 
     @staticmethod
