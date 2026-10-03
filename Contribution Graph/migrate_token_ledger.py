@@ -41,9 +41,9 @@ def migrate_project(source_db, target_db, project_id):
     """
     source_db, target_db = Path(source_db), Path(target_db)
     if not source_db.is_file():
-        raise ValueError(f"source database not found: {source_db}")
-    if target_db.exists():
-        raise ValueError(f"target database already exists: {target_db}; refusing to overwrite")
+        raise ValueError("source database not found")
+    if target_db.exists() and (not target_db.is_file() or target_db.stat().st_size != 0):
+        raise ValueError("target database already exists; refusing to overwrite")
     # Open the legacy store through a read-only connection so migration can
     # never modify the website's live data.
     probe = sqlite3.connect(f"file:{source_db.resolve()}?mode=ro", uri=True)
@@ -51,6 +51,11 @@ def migrate_project(source_db, target_db, project_id):
     store = ContributionStore(source_db, read_only=True)
     view = store.token_view(project_id)
     project = store.projects[project_id]
+    rejected = [item for item in view["skipped"]
+                if item["status"] in ("VERIFIED", "RESOLVED")
+                and not item["reason"].startswith("有效得分为 0")]
+    if rejected:
+        raise ValueError(f"cannot migrate verified contributions: {rejected}")
 
     ledger_project = TokenProject(
         view["project"]["id"], view["project"]["name"],
@@ -58,51 +63,55 @@ def migrate_project(source_db, target_db, project_id):
     )
     token = TokenStore(target_db, ledger_project)
     tasks_by_id = {task["id"]: task for task in view["tasks"]}
+    skipped_ids = {item["contributionId"] for item in view["skipped"]}
+    contributions = {item.id: item for item in store.contributions.values()
+                     if item.project_id == project_id}
+    mint_totals = {task_id: Decimal("0") for task_id in project.task_ids}
+    for item in contributions.values():
+        if item.id not in skipped_ids:
+            mint_totals[item.task_id] += contribution_score(
+                item, project, store.members, store.tasks,
+            )
     for task_id in project.task_ids:
         info = tasks_by_id[task_id]
         legacy = store.tasks[task_id]
         token.add_task(TokenTask(
             task_id, project.id, legacy.name, ValueType(info["valueType"]),
-            Decimal(str(info["mintCap"])), legacy.description.strip() or legacy.name,
+            max(legacy.task_value, mint_totals[task_id]),
+            legacy.description.strip() or legacy.name,
         ))
-
-    contributions = {item.id: item for item in store.contributions.values()
-                     if item.project_id == project_id}
     migrated = []
 
-    def settle_contract(item, legacy_id):
-        contract = next(c for c in view["contracts"] if c["id"] == f"{legacy_id}:commission")
+    def settle_contract(item, amount):
+        contract_id = f"{item.id}:commission"
         token.create_commission(
-            contract["id"], item.task_id, contract["principalId"], contract["contractorId"],
-            str(Decimal(str(contract["contractPrice"]))),
-            str(Decimal(str(contract["maximumMintValue"]))),
+            contract_id, item.task_id, item.helped_member_id, item.contributor_id,
+            amount, amount,
         )
         for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "VERIFIED"):
-            token.advance_contract(contract["id"], status)
-        approvers = [member_id for member_id in project.member_ids
-                     if member_id not in (contract["principalId"], contract["contractorId"])]
-        token.settle_commission(contract["id"], str(Decimal(str(contract["verifiedMintValue"]))),
-                                [f"legacy:{legacy_id}"], approvers[:1])
-        return {"contributionId": legacy_id, "kind": "COMMISSION",
-                "contractId": contract["id"]}
+            token.advance_contract(contract_id, status)
+        token.settle_commission(contract_id, amount,
+                                [f"legacy:{item.id}"], [store._legacy_token_approver(item)])
+        return {"contributionId": item.id, "kind": "COMMISSION",
+                "contractId": contract_id}
 
     # Process contributions in stored rowid order, exactly like the stage-1
     # projection, so the migrated event order matches the token-view order.
     for item in contributions.values():
-        if item.status not in ("VERIFIED", "RESOLVED"):
-            continue
-        if item.type == ContributionType.SUPPORT and item.helped_member_id is None:
+        if item.id in skipped_ids:
             continue
         amount = contribution_score(item, project, store.members, store.tasks)
-        if amount <= 0:
-            continue
-        if item.type == ContributionType.SUPPORT:
-            migrated.append(settle_contract(item, item.id))
+        if (item.type == ContributionType.SUPPORT and item.helped_member_id is not None
+                and store._legacy_token_approver(item)):
+            migrated.append(settle_contract(item, amount))
         else:
             token.mint_direct(f"{item.id}:mint", item.task_id, item.contributor_id,
                               str(amount), [f"legacy:{item.id}"])
             migrated.append({"contributionId": item.id, "kind": "DIRECT",
-                             "eventId": f"{item.id}:mint"})
+                             "eventId": f"{item.id}:mint",
+                             **({"reason": "历史审核没有独立批准人，保留已核验贡献并直接铸币"}
+                                if item.type == ContributionType.SUPPORT and item.helped_member_id
+                                else {})})
 
     payload = token.ledger_payload()
     skipped = view["skipped"]
@@ -119,9 +128,13 @@ def migrate_project(source_db, target_db, project_id):
         "balances": payload["balances"],
         "totalSupply": payload["totalSupply"],
         "oldTeamTotal": view["oldTeamTotal"],
-        "conservation": (abs(Decimal(str(payload["totalSupply"]))
-                             - Decimal(str(view["oldTeamTotal"]))) < Decimal("0.000000001"))
-                        and skip_reasons_ok,
+        "totalSupplyExact": str(token.total_supply()),
+        "oldTeamTotalExact": str(sum(
+            (contribution_score(item, project, store.members, store.tasks)
+             for item in contributions.values()), Decimal("0"))),
+        "conservation": token.total_supply() == sum(
+            (contribution_score(item, project, store.members, store.tasks)
+             for item in contributions.values()), Decimal("0")) and skip_reasons_ok,
     }
     return report
 

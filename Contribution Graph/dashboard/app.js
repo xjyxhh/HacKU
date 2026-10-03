@@ -1,5 +1,7 @@
 const english = {
-  "项目看板": "Project Dashboard", "当前项目": "Current project", "切换项目": "Switch project", "设置": "Settings", "语言": "Language", "界面语言": "Interface language",
+  "跳转到主要内容": "Skip to main content", "正在加载项目…": "Loading project…",
+  "例如 FinTech Demo…": "e.g. FinTech Demo…", "例如 fintech-demo…": "e.g. fintech-demo…", "例如 David…": "e.g. David…", "例如 david…": "e.g. david…",
+  "项目看板": "Project Dashboard", "Token 工作台": "Token workspace", "当前项目": "Current project", "切换项目": "Switch project", "设置": "Settings", "语言": "Language", "界面语言": "Interface language",
   "刷新数据": "Refresh", "页面导航": "Page navigation", "总览": "Overview", "录入": "Add records", "关系图": "Graph", "贡献明细": "Contributions", "贡献审核": "Review",
   "项目总览": "Project overview", "正在加载项目...": "Loading project...", "查看贡献得分、任务价值，以及成员之间的协作关系。": "Explore contribution scores, task values, and team relationships.", "正在读取数据": "Loading data",
   "项目摘要": "Project summary", "团队总分": "Team score", "已验证与已解决贡献": "Verified and resolved contributions", "项目成员": "Members", "参与贡献": "Contributors", "项目任务": "Tasks", "预设任务价值": "Preset task value", "贡献记录": "Contribution records", "等待数据": "Waiting for data",
@@ -24,9 +26,10 @@ const categories = ["CORE", "SUPPORT", "REVIEW", "COORDINATION"];
 const $ = (id) => document.getElementById(id);
 const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const points = (value) => new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value ?? 0);
+const tokenAmount = (value) => String(value ?? "0");
 let currentData = null;
 let selectedId = null;
-let projectId = sessionStorage.getItem("contribution-project") || "fintech";
+let projectId = localStorage.getItem("contribution-project") || "fintech";
 const staticText = [];
 const staticAttributes = [];
 const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -98,11 +101,12 @@ function fillRequiredSelect(id, items, emptyLabel) {
 
 function renderMembers(data) {
   $("members-empty").hidden = data.members.length > 0;
+  const recognition = data.tokenRecognition;
   $("members").innerHTML = data.members.map((member) => `
     <button class="member ${filterValue("member") === member.id ? "is-active" : ""}" type="button" data-member-id="${safe(member.id)}" aria-pressed="${filterValue("member") === member.id}">
-      <span class="member-top"><span class="identity"><span class="avatar" aria-hidden="true">${safe(member.name.slice(0, 1))}</span><span class="member-name">${safe(member.name)}</span></span><span class="share">${Number(member.contributionShare).toFixed(2)}%</span></span>
-      <span class="member-score">${points(member.totalScore)} <small>${t("分")}</small></span>
-      <span class="breakdown">${categories.map((kind) => `<span>${typeName(kind)} <b>${points(member.breakdown[kind])}</b></span>`).join("")}</span>
+      <span class="member-top"><span class="identity"><span class="avatar" aria-hidden="true">${safe(member.name.slice(0, 1))}</span><span class="member-name">${safe(member.name)}</span></span><span class="share">${recognition ? "Token 余额" : `${Number(member.contributionShare).toFixed(2)}%`}</span></span>
+      <span class="member-score">${recognition ? safe(tokenAmount(recognition.balancesExact?.[member.id])) : points(member.totalScore)} <small>${recognition ? "Token" : t("分")}</small></span>
+      <span class="breakdown">${recognition ? `<span>旧贡献分 ${points(member.totalScore)}</span>` : categories.map((kind) => `<span>${typeName(kind)} <b>${points(member.breakdown[kind])}</b></span>`).join("")}</span>
     </button>`).join("");
 }
 
@@ -197,7 +201,8 @@ function renderContributions(data, rows) {
       <td><button class="row-select" type="button" data-contribution-id="${safe(item.id)}" aria-label="${t("查看")} ${safe(members[item.contributorId] ?? item.contributorId)} ${t("的贡献")} ${safe(item.description)}"><strong>${safe(members[item.contributorId] ?? item.contributorId)}</strong><span>${safe(item.description)}</span>${item.helpedMemberId ? `<small>${t("帮助")} ${safe(members[item.helpedMemberId] ?? item.helpedMemberId)}</small>` : ""}</button></td>
       <td data-label="${t("任务")}">${safe(tasks[item.taskId] ?? item.taskId)}</td><td data-label="${t("类型")}"><span class="type">${safe(typeName(item.type))}</span></td>
       <td data-label="${t("状态")}"><span class="status ${item.status.toLowerCase()}">${safe(statusName(item.status))}</span></td>
-      <td data-label="${t("当前得分")}" class="number">${item.status === "PENDING" || item.status === "DISPUTED" ? `<span class="no-score">${t("暂不计分")}</span>` : `<span class="score">${points(item.score)}</span>`}</td>
+      <td data-label="Token 事件">${item.tokenEventId ? `<a href="/token.html?event=${encodeURIComponent(item.tokenEventId)}#activity">${item.tokenEventId.includes(":commission:") ? "委托合约 · " : "铸币 · "}#${item.tokenEventSequence}</a>${item.tokenFrozen ? '<small class="token-state">当前冻结</small>' : ""}` : item.tokenPending ? '<span class="token-state">待补铸</span>' : '<span class="token-state">—</span>'}</td>
+      <td data-label="旧贡献分" class="number">${item.status === "PENDING" || item.status === "DISPUTED" ? `<span class="no-score">${t("暂不计分")}</span>` : `<span class="score">${points(item.score)}</span>`}</td>
     </tr>`).join("");
 }
 
@@ -217,6 +222,12 @@ async function loadDetail(id) {
       ${helped ? `<p class="detail-extra">${t("帮助成员")}${language === "en" ? ": " : "："}${safe(helped.name)}</p>` : ""}
       ${data.evidence.length ? `<p class="detail-extra">${t("证据")}${language === "en" ? ": " : "："}${data.evidence.map((e) => safe(e.reference)).join(language === "en" ? "; " : "；")}</p>` : ""}
       ${item.resolution_note ? `<p class="detail-extra">${t("处理说明")}${language === "en" ? ": " : "："}${safe(item.resolution_note)}</p>` : ""}`;
+    if (record?.tokenEventId) {
+      const eventUrl = `/token.html?event=${encodeURIComponent(record.tokenEventId)}#activity`;
+      $("detail-content").insertAdjacentHTML("beforeend", `<p class="detail-extra">Token：${record.tokenFrozen ? "当前冻结" : "已入账"} · <a href="${safe(eventUrl)}">查看账本事件 #${record.tokenEventSequence}</a></p>`);
+    } else if (record?.tokenPending) {
+      $("detail-content").insertAdjacentHTML("beforeend", '<p class="detail-extra">Token 待补铸。请到 <a href="/token.html#balances">Token 工作台</a> 补同步。</p>');
+    }
   } catch (error) {
     if (selectedId === id) $("detail-content").textContent = language === "en" ? `Could not load details: ${error.message}` : `无法读取详情：${error.message}`;
   }
@@ -244,7 +255,19 @@ function render(data) {
   fillRequiredSelect("task-input", data.tasks, t("选择任务"));
   fillSelect("helped-input", data.members, t("无"), "");
   $("project-name").textContent = data.project.name;
-  $("team-score").textContent = points(data.members.reduce((sum, member) => sum + member.totalScore, 0));
+  $("team-score").textContent = data.tokenRecognition
+    ? tokenAmount(data.tokenRecognition.totalSupplyExact)
+    : points(data.members.reduce((sum, member) => sum + member.totalScore, 0));
+  $("team-score").previousElementSibling.textContent = data.tokenRecognition ? "已认定 Token" : t("团队总分");
+  $("team-score").nextElementSibling.textContent = data.tokenRecognition
+    ? `旧贡献分 ${points(data.members.reduce((sum, member) => sum + member.totalScore, 0))}；待补铸 ${data.tokenRecognition.pendingContributions.length} 条`
+    : t("已验证与已解决贡献");
+  const health = $("token-health");
+  const pending = data.tokenRecognition?.pendingContributions ?? [];
+  const missing = (data.tokenRecognition?.missingMembers?.length ?? 0) +
+    (data.tokenRecognition?.missingTasks?.length ?? 0);
+  health.hidden = !pending.length && !missing;
+  if (!health.hidden) health.innerHTML = `Token 账本有 ${pending.length} 条已审核贡献待补铸、${missing} 个成员或任务待同步。<a href="/token.html#balances">前往 Token 工作台处理</a>`;
   $("member-count").textContent = data.members.length;
   $("task-count").textContent = data.tasks.length;
   $("contribution-count").textContent = data.contributions.length;
@@ -255,7 +278,15 @@ function render(data) {
 }
 
 async function request(url, options) {
-  const response = await fetch(url, { cache: "no-store", ...options });
+  let key = sessionStorage.getItem("tokenAdminKey") || "";
+  const send = () => fetch(url, { cache: "no-store", ...options,
+    headers: { ...options?.headers, ...(key ? { "X-Token-Admin-Key": key } : {}) } });
+  let response = await send();
+  if (response.status === 403 && options?.method === "POST") {
+    sessionStorage.removeItem("tokenAdminKey");
+    key = prompt("请输入账本管理员密钥") || "";
+    if (key) { sessionStorage.setItem("tokenAdminKey", key); response = await send(); }
+  }
   const data = await response.json();
   if (!response.ok) {
     const detail = data.detail ?? data.error;
@@ -295,7 +326,7 @@ function focusContribution(id, scroll = true) {
   renderInteractive();
   loadDetail(id);
   if (scroll) {
-    $("detail").scrollIntoView({ behavior: "smooth", block: "center" });
+    $("detail").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
     $("close-detail").focus({ preventScroll: true });
   }
 }
@@ -304,7 +335,7 @@ function setFilter(name, id) {
   const select = $(`${name}-filter`);
   select.value = select.value === id ? "ALL" : id;
   renderInteractive();
-  $("contribution-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  $("contribution-panel").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
 }
 
 function updateContributionFields() {
@@ -340,7 +371,7 @@ $("refresh").addEventListener("click", refresh);
 $("language-select").addEventListener("change", (event) => setLanguage(event.target.value));
 $("project-select").addEventListener("change", () => {
   projectId = $("project-select").value;
-  sessionStorage.setItem("contribution-project", projectId);
+  localStorage.setItem("contribution-project", projectId);
   selectedId = null;
   $("detail").hidden = true;
   for (const name of ["member", "task", "type", "status"]) $(`${name}-filter`).value = "ALL";
@@ -380,7 +411,7 @@ $("project-form").addEventListener("submit", (event) => {
   const payload = Object.fromEntries(new FormData(form));
   submitForm(form, "/api/projects", payload, async () => {
     projectId = payload.id;
-    sessionStorage.setItem("contribution-project", projectId);
+    localStorage.setItem("contribution-project", projectId);
     selectedId = null;
     await refresh();
     form.reset();
@@ -424,6 +455,10 @@ updateContributionFields();
 setLanguage(language);
 // B publishes a change after a successful write; other dashboard tabs reload the shared data.
 window.addEventListener("storage", (event) => {
+  if (event.key === "contribution-project") {
+    projectId = event.newValue || "fintech";
+    refresh();
+  }
   if (event.key === "contribution-graph-update") refresh();
 });
 window.addEventListener("focus", refresh);

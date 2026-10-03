@@ -3,25 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#103c3d">
   <title>Contribution Graph · 贡献审核</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/review.css">
+  <script src="/i18n.js" defer></script>
   <script src="/review.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">跳转到主要内容</a>
   <div class="shell">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark">CG</span><span>Contribution Graph</span></div>
-      <div class="top-actions"><a class="nav-link" href="/">项目看板</a><button id="refresh" type="button">刷新数据 ↗</button></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">CG</span><span>Contribution Graph</span></div>
+      <div class="top-actions"><label>当前项目 <select id="review-project" aria-label="切换审核项目"></select></label><a class="nav-link" href="/">项目看板</a><a class="nav-link" href="/token.html">Token 工作台</a><details class="settings"><summary>设置</summary><div class="settings-menu"><label for="language-select">语言</label><select id="language-select" aria-label="界面语言"><option value="zh">中文</option><option value="en">English</option></select></div></details><button id="refresh" type="button">刷新数据 ↗</button></div>
     </header>
-    <main>
+    <main id="main-content" tabindex="-1">
       <section class="intro">
         <div><p class="kicker">证据 / 同伴验证 / 争议处理</p><h1>贡献审核</h1><p class="intro-copy" id="project-name">正在读取项目…</p></div>
         <div class="actor-box"><label for="actor">当前操作成员</label><select id="actor" disabled></select><small>演示身份选择，尚未接入登录</small></div>
       </section>
       <div id="error" class="error" role="alert" hidden></div>
-      <div id="success" class="notice" role="status" hidden></div>
+      <div id="success" class="notice" role="status" aria-live="polite" hidden></div>
       <section class="summary" aria-label="审核摘要">
         <div><span>团队总分</span><strong id="team-score">—</strong><small>已验证和已解决的贡献</small></div>
         <div><span>待验证</span><strong id="pending-count">—</strong><small>确认或调整后开始计分</small></div>
@@ -45,7 +48,7 @@
             <section class="detail-section" aria-labelledby="evidence-title">
               <h3 id="evidence-title">证据</h3><ul id="evidence-list" class="records"></ul>
               <form id="evidence-form">
-                <div class="form-grid"><label>证据类型<select id="evidence-kind"><option value="NOTE">文字说明</option><option value="URL">网页链接</option><option value="IMAGE">图片链接</option><option value="GITHUB_PR">GitHub PR 链接</option></select></label><label class="wide">说明或链接<textarea id="evidence-reference" required rows="2" maxlength="4000" placeholder="填写工作记录或证据链接"></textarea></label></div>
+                <div class="form-grid"><label>证据类型<select id="evidence-kind" name="evidence_kind"><option value="NOTE">文字说明</option><option value="URL">网页链接</option><option value="IMAGE">图片链接</option><option value="GITHUB_PR">GitHub PR 链接</option></select></label><label class="wide">说明或链接<textarea id="evidence-reference" name="evidence_reference" autocomplete="off" required rows="2" maxlength="4000" placeholder="例如工作记录或 https://example.com/…"></textarea></label></div>
                 <p class="hint">图片和 PR 保存为链接引用。</p><button id="add-evidence" class="secondary" type="submit">添加证据</button>
               </form>
             </section>
@@ -53,9 +56,9 @@
               <h3 id="review-title">审核操作</h3><p id="action-hint" class="hint"></p>
               <form id="score-form">
                 <div class="form-grid">
-                  <label id="completion-label">完成比例（0–1）<input id="completion" type="number" min="0" max="1" step="0.01" required></label>
-                  <label id="support-label">支持分值<input id="support-value" type="number" min="0" step="any" required></label>
-                  <label>质量系数（0.9–1.1）<input id="quality" type="number" min="0.9" max="1.1" step="0.01" required></label>
+                  <label id="completion-label">完成比例（0–1）<input id="completion" name="completion" type="number" min="0" max="1" step="0.01" required></label>
+                  <label id="support-label">支持分值<input id="support-value" name="support_value" type="number" min="0" step="any" required></label>
+                  <label>质量系数（0.9–1.1）<input id="quality" name="quality" type="number" min="0.9" max="1.1" step="0.01" required></label>
                 </div>
                 <div class="preview-row"><button id="preview" class="secondary" type="submit">预览分数</button><span id="preview-result" aria-live="polite">修改分值后先预览，再提交。</span></div>
               </form>

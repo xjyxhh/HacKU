@@ -98,7 +98,9 @@ class TokenStoreTests(unittest.TestCase):
         store.transfer("e2", "alice", "treasury", "10", "recommendation", ["sha:b"])
         reopened = self.open_store()
         self.assertEqual(reopened.balance("alice"), Decimal("30"))
-        self.assertEqual(reopened.total_supply(), Decimal("40"))
+        self.assertEqual(reopened.total_supply(), Decimal("30"))
+        self.assertEqual(sum(reopened.balances().values(), Decimal("0")), reopened.total_supply())
+        self.assertEqual(reopened.minted_for_task("recommendation"), Decimal("40"))
 
     def test_concurrent_writes_do_not_lose_updates(self):
         import threading
@@ -207,11 +209,17 @@ class TokenStoreTests(unittest.TestCase):
         store.freeze_events([mint.sequence], "争议")
         reopened = self.open_store()
         self.assertEqual(reopened.balance("alice"), Decimal("0"))
+        self.assertEqual(reopened.total_supply(), Decimal("0"))
+        with self.assertRaisesRegex(ValueError, "already been used"):
+            reopened.mint_direct("duplicate-frozen", "recommendation", "bob", "10", ["sha:a"])
         reopened.release_events([mint.sequence], "解决")
-        self.assertEqual(self.open_store().balance("alice"), Decimal("40"))
-        live = store.ledger
+        self.assertEqual(reopened.balance("alice"), Decimal("40"))
         replayed = self.open_store().ledger
-        self.assertEqual(replayed._frozen_events, live._frozen_events)
+        self.assertEqual(replayed._frozen_events, {})
+        self.assertEqual(replayed._minted_evidence, reopened.ledger._minted_evidence)
+        with self.assertRaisesRegex(ValueError, "already been used"):
+            self.open_store().mint_direct("duplicate-released", "recommendation", "bob", "10", ["sha:a"])
+        self.assertEqual(self.open_store().total_supply(), Decimal("40"))
 
     def test_open_without_project_rejects_when_file_has_no_ledger(self):
         with self.assertRaises(ValueError):

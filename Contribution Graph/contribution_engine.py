@@ -130,13 +130,13 @@ def validate_contribution(
     task = tasks.get(contribution.task_id)
     if task is None or task.id not in project.task_ids or task.project_id != project.id:
         raise ValueError("task is not part of the project")
-    if not task.task_value.is_finite() or task.task_value < 0:
+    if not task.task_value.is_finite() or not Decimal("0") <= task.task_value <= Decimal("1000000000000"):
         raise ValueError("task_value must be a nonnegative finite number")
     if not contribution.completion.is_finite() or not Decimal("0") <= contribution.completion <= Decimal("1"):
         raise ValueError("completion must be between 0 and 1")
     if not contribution.quality.is_finite() or not Decimal("0.9") <= contribution.quality <= Decimal("1.1"):
         raise ValueError("quality must be between 0.9 and 1.1")
-    if not contribution.support_value.is_finite() or contribution.support_value < 0:
+    if not contribution.support_value.is_finite() or not Decimal("0") <= contribution.support_value <= Decimal("1000000000000"):
         raise ValueError("support_value must be a nonnegative finite number")
     if contribution.type == ContributionType.CORE and contribution.support_value:
         raise ValueError("CORE contribution cannot include support_value")

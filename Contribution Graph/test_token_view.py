@@ -75,6 +75,7 @@ class TokenViewTests(unittest.TestCase):
             self.assertEqual(contract["contractPrice"], 7.0)
             self.assertEqual(contract["verifiedMintValue"], 7.0)
             self.assertEqual(contract["status"], "SETTLED")
+            self.assertEqual(contract["approverIds"], ["charlie"])
             kinds = [event["kind"] for event in view["events"]]
             self.assertEqual(kinds.count("MINT"), 3)
             self.assertEqual(kinds.count("TRANSFER"), 1)
@@ -86,7 +87,7 @@ class TokenViewTests(unittest.TestCase):
             self.assertEqual({row["contributionId"] for row in view["skipped"]}, {"pending", "disputed"})
             self.assertTrue(all(row["reason"] for row in view["skipped"]))
 
-    def test_support_without_independent_approver_is_skipped(self):
+    def test_support_without_independent_approver_is_direct(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "data.sqlite3"
             store = ContributionStore(path)
@@ -100,9 +101,9 @@ class TokenViewTests(unittest.TestCase):
             store.review_contribution("help", "alice", "CONFIRM")
 
             view = ContributionStore(path).token_view("pair")
-            self.assertEqual(view["totalSupply"], 0.0)
-            self.assertEqual([row["contributionId"] for row in view["skipped"]], ["help"])
-            self.assertIn("approver", view["skipped"][0]["reason"])
+            self.assertEqual(view["totalSupply"], 5.0)
+            self.assertEqual(view["contracts"], [])
+            self.assertEqual(view["events"][0]["id"], "help:mint")
             self.assertEqual(view["contracts"], [])
 
     def test_dashboard_data_exposes_balances(self):

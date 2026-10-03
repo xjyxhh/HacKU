@@ -84,6 +84,7 @@ class ContributionStore:
                 raise ValueError(f"no contribution data in {self.path}")
             if not read_only and not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").fetchone():
                 conn.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
+            conn.execute("BEGIN")
             self._load(conn)
 
     @contextmanager
@@ -139,9 +140,30 @@ class ContributionStore:
             )
         }
 
+    def validate_integrity(self):
+        """Check imported or merged rows against the same rules as API writes."""
+        for task in self.tasks.values():
+            if not task.task_value.is_finite() or not ZERO <= task.task_value <= Decimal("1000000000000"):
+                raise ValueError("task_value must be a nonnegative finite number within the supported range")
+        for item in self.contributions.values():
+            validate_contribution(item, self.projects[item.project_id], self.members, self.tasks)
+        for evidence in self.evidence.values():
+            item = self.contributions[evidence.contribution_id]
+            if evidence.submitted_by not in self.projects[item.project_id].member_ids:
+                raise ValueError("evidence submitter is not a project member")
+            if len(evidence.reference) > 4096:
+                raise ValueError("evidence reference exceeds 4096 characters")
+        for verification in self.verifications.values():
+            item = self.contributions[verification.contribution_id]
+            if verification.reviewer_id not in self.projects[item.project_id].member_ids:
+                raise ValueError("reviewer is not a project member")
+            if (verification.decision != VerificationDecision.DISPUTE
+                    and verification.reviewer_id == item.contributor_id):
+                raise ValueError("reviewer cannot verify their own contribution")
+
     @_write
     def create_project(self, project_id, name):
-        if not project_id or not name.strip() or project_id in self.projects:
+        if not project_id.strip() or not name.strip() or project_id in self.projects:
             raise ValueError("project id must be new and name must be nonempty")
         project = Project(project_id, name)
         self._conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (project_id, name))
@@ -150,10 +172,14 @@ class ContributionStore:
     @_write
     def add_member(self, project_id, member_id, name):
         project = self._project(project_id)
-        if not member_id or not name.strip() or member_id in self.members:
+        if not member_id.strip() or not name.strip() or member_id in project.member_ids:
             raise ValueError("member id must be new and name must be nonempty")
-        member = Member(member_id, name)
-        self._conn.execute("INSERT INTO members (id, name) VALUES (?, ?)", (member_id, name))
+        member = self.members.get(member_id)
+        if member is None:
+            member = Member(member_id, name)
+            self._conn.execute("INSERT INTO members (id, name) VALUES (?, ?)", (member_id, name))
+        elif member.name != name:
+            raise ValueError("existing member id has a different name")
         self._conn.execute("INSERT INTO project_members (project_id, member_id) VALUES (?, ?)",
                            (project.id, member_id))
         return member
@@ -161,10 +187,10 @@ class ContributionStore:
     @_write
     def add_task(self, project_id, task_id, name, task_value, description=""):
         project = self._project(project_id)
-        if not task_id or not name.strip() or task_id in self.tasks:
+        if not task_id.strip() or not name.strip() or task_id in self.tasks:
             raise ValueError("task id must be new and name must be nonempty")
         value = Decimal(str(task_value))
-        if not value.is_finite() or value < 0:
+        if not value.is_finite() or not ZERO <= value <= Decimal("1000000000000"):
             raise ValueError("task_value must be a nonnegative finite number")
         task = Task(task_id, project_id, name, value, description)
         self._conn.execute("INSERT INTO tasks (id, project_id, name, task_value, description) VALUES (?, ?, ?, ?, ?)",
@@ -177,7 +203,7 @@ class ContributionStore:
         completion="1", support_value="0", helped_member_id=None,
     ):
         project = self._project(project_id)
-        if not contribution_id or contribution_id in self.contributions:
+        if not contribution_id.strip() or contribution_id in self.contributions:
             raise ValueError("contribution id must be new")
         if not description.strip():
             raise ValueError("description must be nonempty")
@@ -206,8 +232,8 @@ class ContributionStore:
     def add_evidence(self, contribution_id, submitted_by, kind, reference):
         contribution = self._contribution(contribution_id)
         self._member(contribution.project_id, submitted_by)
-        if not reference.strip():
-            raise ValueError("evidence reference must be nonempty")
+        if not reference.strip() or len(reference) > 4096:
+            raise ValueError("evidence reference must be nonempty and at most 4096 characters")
         evidence = Evidence(uuid4().hex, contribution_id, submitted_by, EvidenceType(kind), reference)
         self._conn.execute("INSERT INTO evidence (id, contribution_id, submitted_by, kind, reference) "
                            "VALUES (?, ?, ?, ?, ?)",
@@ -323,6 +349,7 @@ class ContributionStore:
                 "id": member_id,
                 "name": self.members[member_id].name,
                 "totalScore": float(scores[member_id].total_score),
+                "totalScoreExact": str(scores[member_id].total_score),
                 "contributionShare": float(scores[member_id].contribution_share),
                 "breakdown": {kind.value: float(value) for kind, value in scores[member_id].breakdown.items()},
             } for member_id in project.member_ids],
@@ -350,6 +377,14 @@ class ContributionStore:
             "task": {"id": task.id, "name": task.name, "taskValue": str(task.task_value)},
             "currentScore": float(contribution_score(
                 contribution, self._project(contribution.project_id), self.members, self.tasks)),
+            "currentScoreExact": str(contribution_score(
+                contribution, self._project(contribution.project_id), self.members, self.tasks)),
+            "tokenMintEventId": (
+                f"{contribution.id}:commission:mint"
+                if contribution.type == ContributionType.SUPPORT and contribution.helped_member_id
+                and self._legacy_token_approver(contribution)
+                else f"{contribution.id}:mint"
+            ),
             "proposedScore": self.preview_score(contribution_id)["proposedScore"],
             "evidence": [asdict(item) for item in self.evidence.values()
                          if item.contribution_id == contribution_id],
@@ -388,8 +423,8 @@ class ContributionStore:
     TOKEN_PROJECTION_ASSUMPTIONS = (
         "只投影 VERIFIED / RESOLVED 的贡献；PENDING / DISPUTED 不计分，列入 skipped。",
         "direct：CORE / REVIEW / COORDINATION 的旧得分直接作为铸币量，铸给贡献者。",
-        "commissioned：SUPPORT 视为委托生产，principal = helped_member，contractor = contributor，合约价格 = 旧得分。",
-        "阶段一没有单独记录被委托成果的价值，因此取 verifiedMintValue = contractPrice，即铸 P 给 principal、再转 P 给 contractor。",
+        "commissioned：有真实独立审核人的 SUPPORT 视为委托生产；否则按已核验贡献直接铸币，不虚构批准人。",
+        "委托路径没有单独记录被委托成果的价值，因此取 verifiedMintValue = contractPrice，即铸 P 给 principal、再转 P 给 contractor。",
         "任务 mintCap 取 max(task_value, 该任务本次投影的铸币总量)，使重述既有数据不会被上限拒绝；上限的真正约束留到阶段二。",
         "treasury 是投影合成的地址 <project_id>-treasury，旧数据没有金库概念。",
         "证据幂等键使用 legacy:<contribution_id>，阶段一不做证据级去重。",
@@ -413,10 +448,8 @@ class ContributionStore:
                 skipped.append(self._token_skip(item, "有效得分为 0，无法铸币"))
                 continue
             if item.type == ContributionType.SUPPORT:
-                if item.helped_member_id is None:
-                    skipped.append(self._token_skip(item, "SUPPORT 缺少受帮助成员，无法构成委托合约"))
-                    continue
-                planned.append((item, "COMMISSION", amount))
+                commissioned = item.helped_member_id and self._legacy_token_approver(item)
+                planned.append((item, "COMMISSION" if commissioned else "DIRECT", amount))
             else:
                 planned.append((item, "DIRECT", amount))
             mint_totals[item.task_id] += amount
@@ -462,8 +495,18 @@ class ContributionStore:
                 return TOKEN_VALUE_TYPES[item.type]
         return ValueType.CORE
 
-    @staticmethod
-    def _project_commission(ledger, contribution, amount):
+    def _legacy_token_approver(self, contribution):
+        excluded = {contribution.contributor_id, contribution.helped_member_id}
+        project = self.projects[contribution.project_id]
+        actors = [entry.resolved_by for entry in reversed(list(self.disputes.values()))
+                  if entry.contribution_id == contribution.id and entry.resolved_by]
+        actors += [entry.reviewer_id for entry in reversed(list(self.verifications.values()))
+                   if entry.contribution_id == contribution.id
+                   and entry.decision in (VerificationDecision.CONFIRM, VerificationDecision.ADJUST)]
+        return next((actor for actor in actors
+                     if actor in project.member_ids and actor not in excluded), None)
+
+    def _project_commission(self, ledger, contribution, amount):
         """Replay one legacy SUPPORT contribution as a settled commission contract."""
         contract_id = f"{contribution.id}:commission"
         principal, contractor = contribution.helped_member_id, contribution.contributor_id
@@ -472,9 +515,8 @@ class ContributionStore:
         for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED, ContractStatus.CREDIT_RESERVED,
                        ContractStatus.DELIVERED, ContractStatus.VERIFIED):
             ledger.advance_contract(contract_id, status)
-        approvers = [member_id for member_id in ledger.project.member_ids
-                     if member_id not in (principal, contractor)]
-        ledger.settle_commission(contract_id, amount, key, approvers[:1])
+        ledger.settle_commission(contract_id, amount, key,
+                                 [self._legacy_token_approver(contribution)])
 
     def _token_view_payload(self, project, ledger, scores, skipped):
         minted = {member_id: ZERO for member_id in project.member_ids}
@@ -494,6 +536,7 @@ class ContributionStore:
             "oldScores": [{
                 "memberId": member_id,
                 "totalScore": float(scores[member_id].total_score),
+                "totalScoreExact": str(scores[member_id].total_score),
                 "contributionShare": float(scores[member_id].contribution_share),
                 "breakdown": {kind.value: float(value) for kind, value in scores[member_id].breakdown.items()},
             } for member_id in project.member_ids],
@@ -501,18 +544,26 @@ class ContributionStore:
                 "memberId": member_id,
                 "name": self.members[member_id].name,
                 "minted": float(minted[member_id]),
+                "mintedExact": str(minted[member_id]),
                 "paid": float(paid[member_id]),
+                "paidExact": str(paid[member_id]),
                 "received": float(received[member_id]),
+                "receivedExact": str(received[member_id]),
                 "balance": float(ledger.balance(member_id)),
+                "balanceExact": str(ledger.balance(member_id)),
             } for member_id in project.member_ids],
             "totalSupply": float(ledger.total_supply()),
+            "totalSupplyExact": str(ledger.total_supply()),
             "oldTeamTotal": float(sum((scores[member_id].total_score for member_id in project.member_ids), ZERO)),
+            "oldTeamTotalExact": str(sum((scores[member_id].total_score for member_id in project.member_ids), ZERO)),
             "tasks": [{
                 "id": task_id,
                 "name": self.tasks[task_id].name,
                 "valueType": ledger.tasks[task_id].value_type.value,
                 "mintCap": float(ledger.tasks[task_id].mint_cap),
+                "mintCapExact": str(ledger.tasks[task_id].mint_cap),
                 "budget": {key: float(value) for key, value in ledger.task_budget(task_id).items()},
+                "budgetExact": {key: str(value) for key, value in ledger.task_budget(task_id).items()},
             } for task_id in project.task_ids],
             "contracts": [{
                 "id": item.id,
@@ -520,16 +571,22 @@ class ContributionStore:
                 "principalId": item.principal_id,
                 "contractorId": item.contractor_id,
                 "contractPrice": float(item.contract_price),
+                "contractPriceExact": str(item.contract_price),
                 "maximumMintValue": float(item.maximum_mint_value),
+                "maximumMintValueExact": str(item.maximum_mint_value),
                 "status": item.status.value,
+                "approverIds": list(item.approver_ids),
                 "verifiedMintValue": (float(item.verified_mint_value)
                                       if item.verified_mint_value is not None else None),
+                "verifiedMintValueExact": (str(item.verified_mint_value)
+                                           if item.verified_mint_value is not None else None),
             } for item in ledger.contracts.values()],
             "events": [{
                 "sequence": item.sequence,
                 "id": item.id,
                 "kind": item.kind.value,
                 "amount": float(item.amount),
+                "amountExact": str(item.amount),
                 "sourceId": item.source_id,
                 "destinationId": item.destination_id,
                 "taskId": item.task_id,
@@ -541,7 +598,8 @@ class ContributionStore:
                           for node in graph.nodes],
                 "edges": [{"address": list(edge.address), "kind": edge.kind,
                            "source": list(edge.source), "destination": list(edge.destination),
-                           "amount": float(edge.amount) if edge.amount is not None else None}
+                           "amount": float(edge.amount) if edge.amount is not None else None,
+                           "amountExact": str(edge.amount) if edge.amount is not None else None}
                           for edge in graph.edges],
             },
             "skipped": skipped,

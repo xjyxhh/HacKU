@@ -1,4 +1,7 @@
 .DS_Store
+.box-agent/
+.box-agent-scratch/
+*.artifact.json
 __pycache__/
 .venv/
 *.py[cod]

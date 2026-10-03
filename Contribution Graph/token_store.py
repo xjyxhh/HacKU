@@ -11,8 +11,9 @@ and never touches the eight legacy tables from schema.sql.
 """
 
 import json
+import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,7 +26,25 @@ from token_engine import (
     TokenProject,
     TokenTask,
     ValueType,
+    _amount,
 )
+
+
+def _marker_target(event, target_ids):
+    """Resolve current sequence markers and older id-based freeze markers."""
+    for prefix in ("freeze-seq:", "release-seq:"):
+        if event.id.startswith(prefix):
+            sequence = event.id[len(prefix):].split(":", 1)[0]
+            return int(sequence) if sequence.isdigit() else None
+    for prefix in ("freeze:", "release:"):
+        if event.id.startswith(prefix):
+            tail = event.id[len(prefix):]
+            if tail in target_ids:
+                return target_ids[tail]
+            base, separator, suffix = tail.rpartition(":")
+            if separator and suffix.isdigit():
+                return target_ids.get(base)
+    return None
 
 
 class TokenStore:
@@ -33,26 +52,28 @@ class TokenStore:
 
     def __init__(self, path, project: TokenProject | None = None):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         if project is not None:
-            if self.path.is_file():
-                raise ValueError(
-                    f"token ledger already exists in {self.path}; refusing to overwrite"
-                )
             self._ledger = TokenLedger(project)
-            self._initializing = True
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                with self._write() as conn:
-                    self._insert_project(conn, project)
-            finally:
-                del self._initializing
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(fd)
+            except FileExistsError:
+                pass
+            with self._write(initializing=True) as conn:
+                if conn.execute("SELECT 1 FROM token_projects LIMIT 1").fetchone():
+                    raise ValueError("token ledger already exists; refusing to overwrite")
+                if any(conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                       for table in ("token_tasks", "commission_contracts", "ledger_events")):
+                    raise ValueError("incomplete token ledger contains records; repair it manually")
+                self._insert_project(conn, project)
         else:
             if not self.path.is_file():
-                raise ValueError(
-                    f"no token ledger stored in {self.path}; pass a TokenProject to create one"
-                )
+                raise ValueError("no token ledger stored; pass a TokenProject to create one")
             try:
-                with self._write() as conn:
+                with closing(sqlite3.connect(f"file:{self.path.resolve()}?mode=ro", uri=True, timeout=1)) as conn:
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    conn.execute("BEGIN")
                     self._load_locked(conn)
             except sqlite3.Error as error:
                 raise ValueError(f"token ledger storage error: {error}") from error
@@ -75,7 +96,7 @@ class TokenStore:
             conn.close()
 
     @contextmanager
-    def _write(self):
+    def _write(self, initializing=False):
         """One BEGIN IMMEDIATE transaction per public mutation.
 
         Replay happens under the write lock, so concurrent mutations always
@@ -89,41 +110,41 @@ class TokenStore:
             )
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                self._load_locked(conn)
+                if not initializing:
+                    self._load_locked(conn)
                 yield conn
                 conn.commit()
             except Exception:
                 conn.rollback()
-                self._reload(conn)
+                if hasattr(self, "_ledger") and not initializing:
+                    try:
+                        self._reload(conn)
+                    except Exception:
+                        pass  # Preserve the original transaction failure.
                 raise
 
     def _reload(self, conn):
-        project = self._ledger.project
-        self._ledger = TokenLedger(project)
         self._load_locked(conn)
 
     def _load_locked(self, conn):
         """Rebuild the in-memory ledger from stored definitions and events.
 
-        Must be called while holding the write lock (_write), never on a
-        read-only path.
+        Writes call this after obtaining BEGIN IMMEDIATE; ordinary opens use
+        a read-only connection and observe one committed SQLite snapshot.
         """
         stored = conn.execute(
             "SELECT id, name, treasury_id, member_ids FROM token_projects"
         ).fetchall()
         if not stored:
-            # First write to a fresh ledger file: nothing to replay. Callers
-            # about to insert the initial project keep their in-memory ledger.
-            if getattr(self, "_initializing", False):
-                return
-            raise ValueError(
-                f"no token project stored in {self.path}; pass a TokenProject to create one"
-            )
+            raise ValueError("no token project stored; recreate the incomplete ledger")
         if len(stored) > 1:
             raise ValueError("TokenStore supports exactly one token project per database file")
         project_id, name, treasury_id, member_ids = stored[0]
+        members = json.loads(member_ids)
+        if not isinstance(members, list) or not all(isinstance(item, str) for item in members):
+            raise ValueError("token project member_ids must be a JSON string array")
         self._ledger = TokenLedger(
-            TokenProject(project_id, name, treasury_id, tuple(json.loads(member_ids)))
+            TokenProject(project_id, name, treasury_id, tuple(members))
         )
         for task_id, name, value_type, mint_cap, criteria in conn.execute(
             "SELECT id, name, value_type, mint_cap, acceptance_criteria FROM token_tasks "
@@ -144,13 +165,26 @@ class TokenStore:
         ):
             (contract_id, task_id, principal_id, contractor_id, value_type, price,
              maximum, criteria_hash, status, evidence, approvers, verified, _seq) = row
+            evidence_values, approver_values = json.loads(evidence), json.loads(approvers)
+            if (not isinstance(evidence_values, list) or not isinstance(approver_values, list)
+                    or not all(isinstance(value, str) for value in evidence_values + approver_values)):
+                raise ValueError("contract evidence and approvers must be JSON string arrays")
+            self._ledger._task(task_id)
+            self._ledger._member(principal_id)
+            self._ledger._member(contractor_id)
+            price_value = _amount(price, "stored contract price")
+            maximum_value = _amount(maximum, "stored maximum mint value", allow_zero=False)
+            verified_value = (_amount(verified, "stored verified mint value", allow_zero=False)
+                              if verified is not None else None)
+            if price_value > maximum_value:
+                raise ValueError("stored contract price exceeds its maximum")
             contract = CommissionContract(
                 contract_id, self.project.id, task_id, principal_id, contractor_id,
-                ValueType(value_type), Decimal(price), Decimal(maximum), criteria_hash,
+                ValueType(value_type), price_value, maximum_value, criteria_hash,
                 ContractStatus(status),
-                evidence_hashes=json.loads(evidence),
-                approver_ids=json.loads(approvers),
-                verified_mint_value=Decimal(verified) if verified is not None else None,
+                evidence_hashes=evidence_values,
+                approver_ids=approver_values,
+                verified_mint_value=verified_value,
             )
             self._ledger.contracts[contract_id] = contract
             contracts.append(contract)
@@ -161,29 +195,65 @@ class TokenStore:
             (self.project.id,),
         ):
             sequence, event_id, kind, amount, source, destination, task_id, contract_id, key, note = row
+            event_kind = LedgerEventType(kind)
+            self._ledger._task(task_id)
+            if contract_id is not None and contract_id not in self._ledger.contracts:
+                raise ValueError("ledger event refers to an unknown contract")
+            if event_kind == LedgerEventType.MINT:
+                if source != self.project.treasury_id:
+                    raise ValueError("mint source must be the treasury")
+                self._ledger._member(destination)
+            elif event_kind == LedgerEventType.TRANSFER:
+                self._ledger._member(source)
+                if destination != self.project.treasury_id:
+                    self._ledger._member(destination)
+            elif event_kind in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
+                self._ledger._member(source)
+            value = _amount(amount, "stored event amount")
             event = LedgerEvent(
-                sequence, event_id, self.project.id, LedgerEventType(kind), Decimal(amount),
+                sequence, event_id, self.project.id, event_kind, value,
                 source, destination, task_id, contract_id, key, note,
             )
             self._ledger.events.append(event)
             self._ledger._event_ids.add(event.id)
-        # Freeze tracking: an event is frozen iff its freeze:<id> record exists
-        # in the append-only log (self-contained and replay-safe).
-        self._ledger._frozen_events = {
-            target.sequence: {1}
-            for target in self._ledger.events
-            if target.kind == LedgerEventType.MINT
-            and f"freeze:{target.id}" in self._ledger._event_ids
-        }
+        # Replay freeze state in one pass, including older id-based markers.
+        target_ids = {event.id: event.sequence for event in self._ledger.events
+                      if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER)}
+        targets_by_sequence = {event.sequence: event for event in self._ledger.events
+                               if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER)}
+        marker_counts = {}
+        for event in self._ledger.events:
+            if event.kind not in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
+                continue
+            sequence = _marker_target(event, target_ids)
+            target = targets_by_sequence.get(sequence)
+            if (target is None or event.amount != target.amount
+                    or event.source_id != target.destination_id
+                    or event.task_id != target.task_id):
+                raise ValueError("invalid freeze or release marker")
+            change = 1 if event.kind == LedgerEventType.FREEZE else -1
+            marker_counts[sequence] = marker_counts.get(sequence, 0) + change
+        self._ledger._frozen_events = {sequence: {1} for sequence, count in marker_counts.items()
+                                       if count > 0}
         self._ledger._minted_evidence = {
             event.evidence_key for event in self._ledger.events
             if event.kind == LedgerEventType.MINT
-            and event.sequence not in self._ledger._frozen_events
         }
+        self._ledger._minted_by_task = {}
+        for event in self._ledger.events:
+            if event.kind == LedgerEventType.MINT:
+                self._ledger._minted_by_task[event.task_id] = (
+                    self._ledger._minted_by_task.get(event.task_id, Decimal("0")) + event.amount
+                )
         self._ledger._settled_contracts = {
             contract.id for contract in self._ledger.contracts.values()
             if contract.status == ContractStatus.SETTLED
         }
+        balances = self._ledger.balances()
+        if (any(value < 0 for value in balances.values())
+                or sum(balances.values(), Decimal("0")) != self._ledger.total_supply()
+                or any(count not in (0, 1) for count in marker_counts.values())):
+            raise ValueError("token ledger violates balance or freeze invariants")
 
     # ------------------------------------------------------------- persistence
 
@@ -248,6 +318,19 @@ class TokenStore:
             self._insert_task(conn, task)
         return task
 
+    def add_member(self, member_id: str) -> None:
+        with self._write() as conn:
+            self._ledger.add_member(member_id)
+            conn.execute("UPDATE token_projects SET member_ids = ? WHERE id = ?",
+                         (json.dumps(self.project.member_ids), self.project.id))
+
+    def set_mint_cap(self, task_id: str, mint_cap) -> TokenTask:
+        with self._write() as conn:
+            task = self._ledger.set_mint_cap(task_id, mint_cap)
+            conn.execute("UPDATE token_tasks SET mint_cap = ? WHERE project_id = ? AND id = ?",
+                         (str(task.mint_cap), self.project.id, task_id))
+        return task
+
     def create_commission(self, contract_id, task_id, principal_id, contractor_id,
                           contract_price, maximum_mint_value) -> CommissionContract:
         with self._write() as conn:
@@ -284,6 +367,25 @@ class TokenStore:
             self._insert_events(conn, self._ledger.events[before:])
         return mint, transfer
 
+    def settle_legacy_commission(self, contract_id, task_id, principal_id, contractor_id,
+                                 amount, evidence_hashes, approver_ids):
+        """Create and settle a projected legacy commission in one transaction."""
+        with self._write() as conn:
+            before = len(self._ledger.events)
+            contract = self._ledger.create_commission(
+                contract_id, task_id, principal_id, contractor_id, amount, amount,
+            )
+            for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED,
+                           ContractStatus.CREDIT_RESERVED, ContractStatus.DELIVERED,
+                           ContractStatus.VERIFIED):
+                self._ledger.advance_contract(contract_id, status)
+            mint, transfer = self._ledger.settle_commission(
+                contract_id, amount, evidence_hashes, approver_ids,
+            )
+            self._insert_contract(conn, contract)
+            self._insert_events(conn, self._ledger.events[before:])
+        return mint, transfer
+
     def transfer(self, event_id, source_id, destination_id, amount, task_id,
                  evidence_hashes) -> LedgerEvent:
         with self._write() as conn:
@@ -293,6 +395,72 @@ class TokenStore:
             )
             self._insert_events(conn, self._ledger.events[before:])
         return event
+
+    def reconcile_refund(self, contribution_id, debtor_id, task_id, amount, evidence_hashes):
+        """Return available tokens and record any shortfall for later collection."""
+        with self._write() as conn:
+            self._ledger._member(debtor_id)
+            self._ledger._task(task_id)
+            requested = _amount(amount, "refund amount", allow_zero=False)
+            available = max(Decimal("0"), self._ledger.balance(debtor_id))
+            paid = min(requested, available)
+            event = None
+            if paid:
+                before = len(self._ledger.events)
+                event = self._ledger.transfer(
+                    f"{contribution_id}:refund", debtor_id, self.project.treasury_id,
+                    paid, task_id, evidence_hashes,
+                )
+                self._insert_events(conn, self._ledger.events[before:])
+            remaining = requested - paid
+            if remaining:
+                conn.execute(
+                    "INSERT INTO reconciliation_debts (id, project_id, debtor_id, task_id, amount, remaining, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (contribution_id, self.project.id, debtor_id, task_id,
+                     str(requested), str(remaining), "resolved contribution score reduction"),
+                )
+        return event, remaining
+
+    def debts_payload(self):
+        with closing(sqlite3.connect(f"file:{self.path.resolve()}?mode=ro", uri=True)) as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reconciliation_debts'").fetchone():
+                return []
+            return [
+                {"id": debt_id, "debtorId": debtor_id, "taskId": task_id,
+                 "amountExact": amount, "remainingExact": remaining, "reason": reason}
+                for debt_id, debtor_id, task_id, amount, remaining, reason in conn.execute(
+                    "SELECT id, debtor_id, task_id, amount, remaining, reason FROM reconciliation_debts "
+                    "WHERE project_id = ? ORDER BY rowid", (self.project.id,),
+                )
+            ]
+
+    def collect_debt(self, contribution_id):
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT debtor_id, task_id, remaining FROM reconciliation_debts WHERE id = ? AND project_id = ?",
+                (contribution_id, self.project.id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown reconciliation debt")
+            debtor_id, task_id, remaining_text = row
+            remaining = Decimal(remaining_text)
+            paid = min(remaining, max(Decimal("0"), self._ledger.balance(debtor_id)))
+            event = None
+            if paid:
+                before = len(self._ledger.events)
+                count = sum(event.id.startswith(f"{contribution_id}:debt-payment:")
+                            for event in self._ledger.events)
+                event = self._ledger.transfer(
+                    f"{contribution_id}:debt-payment:{count + 1}", debtor_id,
+                    self.project.treasury_id, paid, task_id,
+                    [f"legacy:{contribution_id}:debt-payment:{count + 1}"],
+                )
+                self._insert_events(conn, self._ledger.events[before:])
+                conn.execute("UPDATE reconciliation_debts SET remaining = ? WHERE id = ?",
+                             (str(remaining - paid), contribution_id))
+        return {"paidExact": str(paid), "remainingExact": str(remaining - paid),
+                "eventId": event.id if event else None}
 
     def freeze_events(self, sequences, reason: str = "", tag: str | None = None) -> list[LedgerEvent]:
         with self._write() as conn:
@@ -338,12 +506,16 @@ class TokenStore:
                 "contractorId": contract.contractor_id,
                 "valueType": contract.value_type.value,
                 "contractPrice": float(contract.contract_price),
+                "contractPriceExact": str(contract.contract_price),
                 "maximumMintValue": float(contract.maximum_mint_value),
+                "maximumMintValueExact": str(contract.maximum_mint_value),
                 "status": contract.status.value,
                 "evidenceHashes": list(contract.evidence_hashes),
                 "approverIds": list(contract.approver_ids),
                 "verifiedMintValue": (float(contract.verified_mint_value)
                                       if contract.verified_mint_value is not None else None),
+                "verifiedMintValueExact": (str(contract.verified_mint_value)
+                                           if contract.verified_mint_value is not None else None),
             }
             for contract in self._ledger.contracts.values()
         ]
@@ -356,24 +528,37 @@ class TokenStore:
                       for node in graph.nodes],
             "edges": [{"address": list(edge.address), "kind": edge.kind,
                        "source": list(edge.source), "destination": list(edge.destination),
-                       "amount": float(edge.amount) if edge.amount is not None else None}
+                       "amount": float(edge.amount) if edge.amount is not None else None,
+                       "amountExact": str(edge.amount) if edge.amount is not None else None}
                       for edge in graph.edges],
         }
 
     def ledger_payload(self) -> dict:
         """JSON-ready snapshot of events, balances, and totals for the API layer."""
+        target_ids = {event.id: event.sequence for event in self._ledger.events
+                      if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER)}
+        freeze_tags = {}
+        for marker in self._ledger.events:
+            if marker.kind == LedgerEventType.FREEZE:
+                sequence = _marker_target(marker, target_ids)
+                if sequence is not None:
+                    freeze_tags[sequence] = marker.destination_id
         events = [
             {
                 "sequence": event.sequence,
                 "id": event.id,
                 "kind": event.kind.value,
                 "amount": float(event.amount),
+                "amountExact": str(event.amount),
                 "sourceId": event.source_id,
                 "destinationId": event.destination_id,
                 "taskId": event.task_id,
                 "contractId": event.contract_id,
                 "evidenceKey": event.evidence_key,
                 "note": event.note,
+                "frozen": event.sequence in self._ledger._frozen_events
+                if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER) else False,
+                "freezeTag": freeze_tags.get(event.sequence),
             }
             for event in self._ledger.events
         ]
@@ -382,7 +567,10 @@ class TokenStore:
             "treasuryId": self.project.treasury_id,
             "memberIds": list(self.project.member_ids),
             "totalSupply": float(self._ledger.total_supply()),
+            "totalSupplyExact": str(self._ledger.total_supply()),
+            "grossMintedExact": str(sum((event.amount for event in self._ledger.events
+                                          if event.kind == LedgerEventType.MINT), Decimal("0"))),
             "balances": {member: float(balance) for member, balance in self._ledger.balances().items()},
+            "balancesExact": {member: str(balance) for member, balance in self._ledger.balances().items()},
             "events": events,
         }
-

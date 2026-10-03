@@ -1,6 +1,6 @@
 """Token ledger, commission settlement, and graph projection for role A."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
@@ -8,6 +8,13 @@ from typing import Iterable
 
 
 ZERO = Decimal("0")
+MAX_VALUE = Decimal("1000000000000")
+
+
+def nonblank(value, name):
+    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+        raise ValueError(f"{name} must be a nonempty id of at most 256 characters")
+    return value
 
 
 class ValueType(str, Enum):
@@ -121,6 +128,9 @@ def criteria_hash(criteria: str) -> str:
 
 
 def evidence_key(hashes: Iterable[str]) -> str:
+    hashes = list(hashes)
+    if len(hashes) > 100 or any(not isinstance(value, str) or len(value) > 4096 for value in hashes):
+        raise ValueError("at most 100 evidence hashes of 4096 characters are allowed")
     values = sorted(set(hashes))
     if not values or any(not value.strip() for value in values):
         raise ValueError("at least one nonempty evidence hash is required")
@@ -129,7 +139,7 @@ def evidence_key(hashes: Iterable[str]) -> str:
 
 def _amount(value, name: str, *, allow_zero: bool = True) -> Decimal:
     amount = Decimal(str(value))
-    if not amount.is_finite() or amount < ZERO or (not allow_zero and amount == ZERO):
+    if not amount.is_finite() or amount < ZERO or amount > MAX_VALUE or (not allow_zero and amount == ZERO):
         qualifier = "positive" if not allow_zero else "nonnegative"
         raise ValueError(f"{name} must be a {qualifier} finite number")
     return amount
@@ -139,8 +149,14 @@ class TokenLedger:
     """Append-only in-memory ledger with deterministic balances and graph output."""
 
     def __init__(self, project: TokenProject):
-        if not project.id or not project.name.strip() or not project.treasury_id:
+        nonblank(project.id, "project id")
+        nonblank(project.treasury_id, "treasury id")
+        if not project.name.strip():
             raise ValueError("project id, name, and treasury id are required")
+        for member_id in project.member_ids:
+            nonblank(member_id, "member id")
+        if len(project.member_ids) > 1000 or project.treasury_id in project.member_ids:
+            raise ValueError("project must have at most 1000 members and treasury must be separate")
         if len(set(project.member_ids)) != len(project.member_ids):
             raise ValueError("project member ids must be unique")
         self.project = project
@@ -149,18 +165,37 @@ class TokenLedger:
         self.events: list[LedgerEvent] = []
         self._event_ids: set[str] = set()
         self._minted_evidence: set[str] = set()
+        self._minted_by_task: dict[str, Decimal] = {}
         self._settled_contracts: set[str] = set()
         self._frozen_events: dict[int, set[int]] = {}
 
+    def add_member(self, member_id: str) -> None:
+        nonblank(member_id, "member id")
+        if member_id == self.project.treasury_id or member_id in self.project.member_ids:
+            raise ValueError("token member id must be new and differ from treasury")
+        self.project = replace(self.project, member_ids=(*self.project.member_ids, member_id))
+
     def add_task(self, task: TokenTask) -> None:
+        nonblank(task.id, "task id")
         if task.id in self.tasks or task.project_id != self.project.id:
             raise ValueError("task id must be new and belong to the project")
         if not task.name.strip():
             raise ValueError("task name must be nonempty")
-        _amount(task.mint_cap, "mint cap")
+        cap = _amount(task.mint_cap, "mint cap")
         if not task.acceptance_criteria.strip():
             raise ValueError("acceptance criteria must be nonempty")
-        self.tasks[task.id] = task
+        self.tasks[task.id] = replace(task, mint_cap=cap)
+
+    def set_mint_cap(self, task_id: str, mint_cap) -> TokenTask:
+        task = self._task(task_id)
+        cap = _amount(mint_cap, "mint cap")
+        budget = self.task_budget(task_id)
+        if cap < budget["minted"] + budget["reserved"]:
+            raise ValueError("mint cap cannot be below minted and reserved value")
+        updated = TokenTask(task.id, task.project_id, task.name, task.value_type,
+                            cap, task.acceptance_criteria)
+        self.tasks[task_id] = updated
+        return updated
 
     def create_commission(
         self,
@@ -172,7 +207,8 @@ class TokenLedger:
         maximum_mint_value,
     ) -> CommissionContract:
         task = self._task(task_id)
-        if not contract_id or contract_id in self.contracts:
+        nonblank(contract_id, "contract id")
+        if contract_id in self.contracts:
             raise ValueError("contract id must be new")
         self._member(principal_id)
         self._member(contractor_id)
@@ -208,10 +244,14 @@ class TokenLedger:
             ContractStatus.DELIVERED: {ContractStatus.VERIFIED, ContractStatus.DISPUTED},
             ContractStatus.VERIFIED: {ContractStatus.DISPUTED},
             ContractStatus.DISPUTED: {ContractStatus.FROZEN},
+            ContractStatus.FROZEN: {ContractStatus.DELIVERED},
         }
         status = ContractStatus(status)
         if status not in allowed.get(contract.status, set()):
             raise ValueError(f"invalid contract transition: {contract.status.value} -> {status.value}")
+        if contract.status == ContractStatus.FROZEN and status == ContractStatus.DELIVERED:
+            if self.task_budget(contract.task_id)["available"] < contract.maximum_mint_value:
+                raise ValueError("task mint cap cannot reserve this contract again")
         contract.status = status
         return contract
 
@@ -224,6 +264,7 @@ class TokenLedger:
         event = self._event(event_id, LedgerEventType.MINT, value, self.project.treasury_id,
                             recipient_id, task.id, None, key, "direct production")
         self._minted_evidence.add(key)
+        self._minted_by_task[task.id] = self._minted_by_task.get(task.id, ZERO) + value
         return event
 
     def settle_commission(
@@ -265,6 +306,7 @@ class TokenLedger:
         self.events.extend((mint, transfer))
         self._event_ids.update((mint.id, transfer.id))
         self._minted_evidence.add(key)
+        self._minted_by_task[task.id] = self._minted_by_task.get(task.id, ZERO) + value
         self._settled_contracts.add(contract.id)
         contract.evidence_hashes = sorted(set(evidence_hashes))
         contract.approver_ids = approvers
@@ -300,18 +342,22 @@ class TokenLedger:
         reason = reason.strip()
         for sequence in sequences:
             target = self._event_by_sequence(sequence)
-            if target.kind != LedgerEventType.MINT:
-                raise ValueError("only MINT events can be frozen")
+            if target.kind not in (LedgerEventType.MINT, LedgerEventType.TRANSFER):
+                raise ValueError("only MINT or TRANSFER events can be frozen")
             frozen = self._frozen_events.setdefault(sequence, set())
-            if len(frozen) >= 1:
+            if frozen:
                 continue
+            if self.balance(target.destination_id) < target.amount:
+                raise ValueError("insufficient token balance to freeze")
+            count = sum(event.id.startswith(f"freeze-seq:{sequence}:") for event in self.events)
+            freeze_id = f"freeze-seq:{sequence}:{count + 1}"
             events.append(self._event(
-                f"freeze:{target.id}", LedgerEventType.FREEZE, target.amount,
+                freeze_id, LedgerEventType.FREEZE, target.amount,
                 target.destination_id, tag or str(sequence), target.task_id,
                 target.contract_id, target.evidence_key,
                 reason or "dispute freeze",
             ))
-            frozen.add(len(events))
+            frozen.add(1)
         return events
 
     def release_events(self, sequences: Iterable[int], note: str = "",
@@ -325,14 +371,14 @@ class TokenLedger:
             target = self._event_by_sequence(sequence)
             if len(self._frozen_events.get(sequence, ())) < 1:
                 raise ValueError(f"event {sequence} is not frozen")
+            count = sum(event.id.startswith(f"release-seq:{sequence}:") for event in self.events)
+            release_id = f"release-seq:{sequence}:{count + 1}"
             events.append(self._event(
-                f"release:{target.id}", LedgerEventType.RELEASE, target.amount,
+                release_id, LedgerEventType.RELEASE, target.amount,
                 target.destination_id, tag or str(sequence), target.task_id,
                 target.contract_id, target.evidence_key,
                 note.strip() or "dispute resolved",
             ))
-            if target.kind == LedgerEventType.MINT:
-                self._minted_evidence.add(target.evidence_key)
             self._frozen_events[sequence].clear()
         return events
 
@@ -365,15 +411,37 @@ class TokenLedger:
         return balance
 
     def balances(self) -> dict[str, Decimal]:
-        return {member_id: self.balance(member_id) for member_id in self.project.member_ids}
+        balances = {member_id: ZERO for member_id in self.project.member_ids}
+        for event in self.events:
+            if event.kind == LedgerEventType.FREEZE:
+                if event.source_id in balances:
+                    balances[event.source_id] -= event.amount
+            elif event.kind == LedgerEventType.RELEASE:
+                if event.source_id in balances:
+                    balances[event.source_id] += event.amount
+            else:
+                if event.destination_id in balances:
+                    balances[event.destination_id] += event.amount
+                if event.source_id in balances:
+                    balances[event.source_id] -= event.amount
+        return balances
 
     def total_supply(self) -> Decimal:
-        return sum((event.amount for event in self.events if event.kind == LedgerEventType.MINT), ZERO)
+        """Tokens currently held by project members, excluding frozen or returned tokens."""
+        supply = ZERO
+        for event in self.events:
+            if event.kind in {LedgerEventType.MINT, LedgerEventType.RELEASE}:
+                supply += event.amount
+            elif event.kind == LedgerEventType.FREEZE or (
+                event.kind == LedgerEventType.TRANSFER
+                and event.destination_id == self.project.treasury_id
+            ):
+                supply -= event.amount
+        return supply
 
     def minted_for_task(self, task_id: str) -> Decimal:
         self._task(task_id)
-        return sum((event.amount for event in self.events
-                    if event.kind == LedgerEventType.MINT and event.task_id == task_id), ZERO)
+        return self._minted_by_task.get(task_id, ZERO)
 
     def task_budget(self, task_id: str) -> dict[str, Decimal]:
         task = self._task(task_id)
@@ -416,8 +484,11 @@ class TokenLedger:
                           contract_addr, task_addr),
             ))
         for event in self.events:
+            if event.kind in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
+                continue
             source = treasury_addr if event.source_id == self.project.treasury_id else prefix + ("member", event.source_id or "")
-            destination = prefix + ("member", event.destination_id or "")
+            destination = (treasury_addr if event.destination_id == self.project.treasury_id
+                           else prefix + ("member", event.destination_id or ""))
             edges.append(GraphEdge(prefix + ("edge", event.kind.value.lower(), event.id),
                                    "MINTED" if event.kind == LedgerEventType.MINT else "PAID",
                                    source, destination, event.amount))
@@ -435,15 +506,13 @@ class TokenLedger:
         return self.events[sequence - 1]
 
     def _event(self, event_id, kind, amount, source, destination, task_id, contract_id, key, note):
-        if not event_id or event_id in self._event_ids:
+        nonblank(event_id, "event id")
+        if event_id in self._event_ids:
             raise ValueError("event id must be new")
         event = LedgerEvent(len(self.events) + 1, event_id, self.project.id, kind, amount,
                             source, destination, task_id, contract_id, key, note)
         self.events.append(event)
         self._event_ids.add(event_id)
-        if kind == LedgerEventType.FREEZE:
-            # A frozen mint's evidence may not mint again while frozen.
-            self._minted_evidence.discard(key)
         return event
 
     def _task(self, task_id: str) -> TokenTask:

@@ -36,12 +36,13 @@ python3 contribution_store.py --db workflow.sqlite3 record c4
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+export TOKEN_ADMIN_KEY='请替换为仅管理员知晓的长随机密钥'
 .venv/bin/python dashboard_server.py
 ```
 
 如果本地没有 `data.sqlite3`，先运行 `.venv/bin/python import_json.py data.json data.sqlite3`。`data.json` 是已合并数据的可移植快照；服务不会在默认路径上悄悄创建空数据库。
 
-浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。页面可切换或创建项目、添加成员和任务、提交四类贡献；提交后立即从 SQLite 重新读取，显示待验证记录。项目、成员、任务和贡献 ID 需要在数据库中唯一。顶部导航串起总览、录入、关系图和贡献明细。关系图显示每条“成员 → 贡献 → 任务”关系，并以虚线标出受帮助成员；点击贡献可查看详情和评分输入字段。刷新保留当前项目、筛选和选中的贡献。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。例如确认 Charlie 的待验证贡献：
+浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。页面可切换或创建项目、添加成员和任务、提交四类贡献；提交后立即从 SQLite 重新读取，显示待验证记录。项目、任务和贡献 ID 在数据库中唯一；同一成员 ID 可加入多个项目，但名称须一致。顶部导航串起总览、录入、关系图和贡献明细。关系图显示每条“成员 → 贡献 → 任务”关系，并以虚线标出受帮助成员；点击贡献可查看详情和评分输入字段。刷新保留当前项目、筛选和选中的贡献。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。例如确认 Charlie 的待验证贡献：
 
 页头“设置”可在中文和 English 之间切换界面语言，选择保存在当前浏览器中；项目名称、任务说明、贡献描述等录入内容保持原文。
 
@@ -71,10 +72,11 @@ POST 请求使用 JSON 请求体，字段名称与 `contribution_store.py` 中�
 ```sh
 curl -X POST http://127.0.0.1:8000/api/contributions/c3/reviews \
   -H 'Content-Type: application/json' \
+  -H "X-Token-Admin-Key: $TOKEN_ADMIN_KEY" \
   -d '{"reviewer_id":"alice","decision":"CONFIRM"}'
 ```
 
-服务默认仅监听本机。当前接口使用请求中的成员 ID，尚无登录身份验证；若要开放给外部用户，需先加入认证，并将 SQLite 存储改为 PostgreSQL 等服务数据库。
+服务默认仅监听本机。写入由统一管理员密钥保护，当前接口仍使用请求中的成员 ID，没有按成员登录的身份验证；若要开放给外部用户，需先加入成员认证，并评估使用服务数据库。
 
 ## 数据快照与备份
 
@@ -84,7 +86,7 @@ curl -X POST http://127.0.0.1:8000/api/contributions/c3/reviews \
 python3 import_json.py data.json data.sqlite3
 ```
 
-导入工具拒绝覆盖已有数据库。合并前的两份 SQLite 原库保存在 `data.before-merge-*.sqlite3` 和 `demo.before-merge-*.sqlite3`；SQLite 文件已加入 `.gitignore`。日常修改以 `data.sqlite3` 为准，提交更改前运行 `python3 export_json.py` 更新可移植快照。
+导入工具拒绝覆盖已有数据库。合并前的两份 SQLite 原库保存在 `data.before-merge-*.sqlite3` 和 `demo.before-merge-*.sqlite3`；SQLite 文件已加入 `.gitignore`。日常修改以 `data.sqlite3` 为准，提交更改前运行 `python3 export_json.py` 更新可移植快照。默认导出会把同目录的 `token.sqlite3` 一并写入快照；导入含账本的快照时会在目标目录恢复该文件。自定义账本路径可用 `export_json.py --token-db PATH` 指定。
 
 ## 将来迁移到 PostgreSQL 时
 
@@ -121,6 +123,20 @@ python3 import_json.py data.json data.sqlite3
 ```
 
 详细实现与验收步骤见仓库根目录的 `B-实现说明.md`。
+
+## Token 工作台
+
+打开 `http://127.0.0.1:8000/token.html`。第一次使用可选择旧项目并迁移已验证的历史贡献，也可创建空账本。迁移只在 `token.sqlite3` 不存在时执行；未验证和争议中的贡献会跳过。历史 SUPPORT 若有真实的独立审核人，会迁成委托合约并记录该审核人；否则以直接铸币保留已核验贡献，不生成虚构批准人。无法映射的其他已验证贡献会使迁移失败。页面会显示迁移预览与结果。当前服务实例只有一份 Token 账本，页面会提示它与看板所选项目是否一致。
+
+账本建立后，可同步旧项目成员与任务，调整任务铸币上限，查看已铸、预留和可用预算，直接铸币、转账，以及创建、推进和结算委托合约。合约交付或验证后可进入争议、冻结，再重新交付和验证。账本事件页可按类型筛选，并对铸币或转账事件执行多轮冻结、释放。成员余额、事件和关系图均由 Token API 重新读取。审核旧贡献时，页面会显示自动铸币、冻结、释放或跳过原因；漏铸可用“补同步已审核贡献”重试。
+
+新增接口：`GET /api/token/tasks`、`POST /api/token/migrate?project_id=...`、`POST /api/token/freeze` 和 `POST /api/token/release`。冻结和释放请求接受 `sequences` 数组，分别使用 `reason` 或 `note`，可选 `tag`。迁移目标文件已存在时拒绝覆盖。已验证贡献不能完整迁移时，迁移会报错，避免留下部分账本。
+
+写入前必须设置 `TOKEN_ADMIN_KEY` 环境变量。所有会修改数据的 API 都要带 `X-Token-Admin-Key`，包括旧项目录入和审核，因为这些数据会进入 Token 账本；网页在首次收到 403 时提示输入，密钥只保存在当前浏览器会话中。未设置密钥时写入返回 503。密钥授予全部账本管理权限，包括设定 `mint_cap`、铸币和指定转账来源；应只交给可信管理员。`mint_cap` 是业务预算，不单独构成安全边界。金额响应保留原有数字字段供展示，并提供 `*Exact` 字符串字段供精确对账。
+
+匹配项目的持久账本是看板上的成员认定来源；旧分保留为对照。旧贡献审核与 Token 账本分处两个 SQLite 文件，不能作为一笔跨库事务提交。审核会先检查预算和独立审批人；临时写入失败时，看板的 `tokenRecognition.pendingContributions` 列出未补铸记录，管理员可调用 `POST /api/token/reconcile` 重试。手工铸币填写 `contribution_id` 时，后端要求贡献已审核且接收人、金额、任务和证据标识与贡献一致；留空表示独立 Token 工作。
+
+争议降分时，如果贡献者已转出 Token，系统只回收其现有余额，将缺额写入 `GET /api/token/debts`。待其获得足够余额后，管理员调用 `POST /api/token/debts/{contribution_id}/collect` 追偿。待追偿期间，Token 流通量可能高于已解决的旧分数。
 
 ## 手动操作全套流程
 

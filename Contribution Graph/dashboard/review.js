@@ -7,10 +7,17 @@ const points = (value) => new Intl.NumberFormat("zh-CN", { maximumFractionDigits
 const state = { dashboard: null, detail: null, selectedId: null, busy: false, preview: null };
 
 async function request(path, body) {
-  const response = await fetch(path, {
+  let key = sessionStorage.getItem("tokenAdminKey") || "";
+  const send = () => fetch(path, {
     cache: "no-store",
-    ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+    ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { "X-Token-Admin-Key": key } : {}) }, body: JSON.stringify(body) }),
   });
+  let response = await send();
+  if (response.status === 403 && body !== undefined) {
+    sessionStorage.removeItem("tokenAdminKey");
+    key = prompt("请输入账本管理员密钥") || "";
+    if (key) { sessionStorage.setItem("tokenAdminKey", key); response = await send(); }
+  }
   const data = await response.json();
   if (!response.ok) {
     // FastAPI's schema errors contain an array; business errors contain a string.
@@ -155,7 +162,14 @@ function invalidatePreview() {
 async function reloadData() {
   state.detail = null;
   renderDetail();
-  state.dashboard = await request("/api/projects/fintech/dashboard");
+  const projects = await request("/api/projects");
+  const preferred = localStorage.getItem("contribution-project") || "fintech";
+  const projectId = projects.some((project) => project.id === preferred)
+    ? preferred : projects[0]?.id;
+  $("review-project").replaceChildren(...projects.map((project) => new Option(project.name, project.id)));
+  if (!projectId) throw new Error("尚无项目");
+  $("review-project").value = projectId;
+  state.dashboard = await request(`/api/projects/${encodeURIComponent(projectId)}/dashboard`);
   const rows = visibleContributions();
   if (!rows.some((item) => item.id === state.selectedId)) state.selectedId = rows[0]?.id ?? null;
   renderProject();
@@ -187,12 +201,19 @@ async function mutate(suffix, body, label) {
   const id = state.selectedId;
   let saved = false;
   try {
-    await request(`/api/contributions/${encodeURIComponent(id)}/${suffix}`, body);
+    const result = await request(`/api/contributions/${encodeURIComponent(id)}/${suffix}`, body);
     saved = true;
     // Storage events notify other tabs. Every score shown here is re-read from the backend.
     try { localStorage.setItem("contribution-graph-update", `${Date.now()}-${Math.random()}`); } catch { /* Manual refresh remains available. */ }
     await reloadData();
-    $("success").textContent = `${id}：${label}，数据已保存。团队总分 ${$("team-score").textContent} 分。`;
+    const token = result.tokenMint ?? result.tokenFrozen ?? result.tokenResolved;
+    const tokenNote = token?.skipped ? ` Token 处理未完成：${token.skipped}。`
+      : token?.kind === "DIRECT" || token?.kind === "COMMISSION" ? ` 已生成 ${points(token.amount)} Token。`
+        : token?.kind === "FREEZE" ? " 关联 Token 已冻结。"
+          : token?.finalAmount !== undefined && /[1-9]/.test(token?.correction?.debtExact ?? "0")
+            ? ` Token 已处理，仍有 ${token.correction.debtExact} 待追偿；请到 Token 工作台查看。`
+            : token?.finalAmount !== undefined ? ` Token 已按最终分值 ${points(token.finalAmount)} 更新。` : "";
+    $("success").textContent = `${id}：${label}，数据已保存。团队总分 ${$("team-score").textContent} 分。${tokenNote}`;
     $("success").hidden = false;
   } catch (error) {
     if (saved) { state.detail = null; renderDetail(); }
@@ -209,6 +230,11 @@ async function review(decision) {
 }
 
 $("refresh").addEventListener("click", refresh);
+$("review-project").addEventListener("change", () => {
+  localStorage.setItem("contribution-project", $("review-project").value);
+  state.selectedId = null;
+  refresh();
+});
 $("status-filter").addEventListener("change", refresh);
 $("actor").addEventListener("change", () => { clearMessages(); invalidatePreview(); });
 $("contribution-list").addEventListener("click", (event) => {
@@ -242,3 +268,7 @@ $("resolve").addEventListener("click", async () => {
   await mutate("resolve", { resolved_by: $("actor").value, resolution, ...scoreChanges() }, "解决争议");
 });
 refresh();
+window.addEventListener("focus", refresh);
+window.addEventListener("storage", (event) => {
+  if (event.key === "contribution-graph-update" || event.key === "contribution-project") refresh();
+});

@@ -1,6 +1,6 @@
 # HacKU · Contribution Graph
 
-一个用于记录团队任务贡献、同伴核验与协作关系的本地 Web 应用。项目按 `CORE`（核心）、`SUPPORT`（支持）、`REVIEW`（审查）和 `COORDINATION`（协调）四类贡献计分；待核验或争议中的贡献暂不计分。
+一个用于记录团队任务贡献、同伴核验与协作关系的本地 Web 应用。项目按 `CORE`（核心）、`SUPPORT`（支持）、`REVIEW`（审查）和 `COORDINATION`（协调）四类贡献计分；待核验或争议中的贡献暂不计分。项目面向 HacKU 2026 原型演示，适合可信团队在本机使用。
 
 ## 功能
 
@@ -9,7 +9,9 @@
 - **项目看板**：查看团队总分、成员得分及占比、任务价值和贡献明细。
 - **协作关系图**：展示「成员 → 贡献 → 任务」关系，以虚线标出受帮助成员，并与明细、成员和任务筛选联动；支持按类型、状态、得分和成员排序。
 - **中英双语**：页头「设置」可在中文与 English 之间切换，选择保存在当前浏览器。
-- **统一数据源**：看板、审核页面与命令行共用本地 SQLite 数据库，默认服务地址为 `http://127.0.0.1:8000`。
+- **Token 认定**：启用匹配项目的账本后，看板以持久 Token 余额显示成员认定结果，并保留旧贡献分作对照；漏铸可从工作台补同步。
+- **账本操作**：迁移已核验的历史贡献，管理任务预算、直接铸币、转账、委托合约、冻结与释放、事件记录及待追偿债务。
+- **数据存储**：旧贡献与 Token 账本分别使用 SQLite 文件，默认服务地址为 `http://127.0.0.1:8000`。
 
 ## 快速开始
 
@@ -20,6 +22,7 @@ cd 'Contribution Graph'
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python import_json.py data.json data.sqlite3
+export TOKEN_ADMIN_KEY='替换为仅管理员知晓的长随机密钥'
 .venv/bin/python dashboard_server.py
 ```
 
@@ -27,9 +30,31 @@ python3 -m venv .venv
 
 - [项目看板](http://127.0.0.1:8000) — 总览、录入、关系图与贡献明细。
 - [贡献审核](http://127.0.0.1:8000/review.html) — 证据、同伴验证与争议处理。
+- [Token 工作台](http://127.0.0.1:8000/token.html) — 余额、预算、委托、事件与补同步。
 - [API 文档](http://127.0.0.1:8000/docs) — 交互式接口说明。
 
-`import_json.py` 仅用于首次初始化，已有 `data.sqlite3` 时无需再次导入。SQLite 文件不进入 Git；仓库中的 `data.json` 是可移植的数据快照。
+`import_json.py` 仅用于首次初始化，已有 `data.sqlite3` 时无需再次导入；它不会覆盖已有数据库。SQLite 文件不进入 Git；仓库中的 `data.json` 是可移植的数据快照。服务默认只监听 `127.0.0.1:8000`，可用 `dashboard_server.py --port 端口`、`--db 路径`、`--token-db 路径` 调整。浏览器代码无需构建。
+
+首次在网页进行写操作时，页面会提示输入 `TOKEN_ADMIN_KEY`；密钥仅保存在当前浏览器会话。API 写请求需带 `X-Token-Admin-Key` 请求头，例如：
+
+```sh
+curl -X POST http://127.0.0.1:8000/api/projects \
+  -H 'Content-Type: application/json' \
+  -H "X-Token-Admin-Key: $TOKEN_ADMIN_KEY" \
+  -d '{"id":"demo","name":"Demo Project"}'
+```
+
+未设置服务端密钥时，受保护的写请求返回 503；密钥错误时返回 403。管理员密钥允许管理整个账本，当前成员身份仍由请求中的成员 ID 指定，没有按成员登录的认证。
+
+## 推荐使用流程
+
+1. 在看板选择现有项目，或创建项目、成员及带价值的任务。
+2. 提交贡献并添加证据。新贡献为 `PENDING`，当前得分为 0。
+3. 在审核页由另一名成员确认、调整或提出争议；调整前可预览分数。争议解决后保留完整记录。
+4. 在 Token 工作台迁移该项目已核验的历史贡献，或创建空账本。当前一个服务实例只使用一份 Token 账本，操作前应核对项目 ID。
+5. 查看余额、预算和事件；未同步的已审核贡献可在工作台补同步。争议降分而余额不足时，可在余额恢复后追偿欠额。
+
+Token 迁移会跳过待核验和争议中的贡献；已核验贡献无法完整映射时会失败。历史 `SUPPORT` 贡献在有真实独立审核人时映射为委托合约。详细规则和操作示例见 [应用文档](Contribution%20Graph/README.md)。
 
 ## 项目结构
 
@@ -38,8 +63,9 @@ python3 -m venv .venv
 | `Contribution Graph/contribution_engine.py` | 数据模型、校验和评分规则 |
 | `Contribution Graph/contribution_store.py` | SQLite 读写、业务流程与命令行 |
 | `Contribution Graph/dashboard_server.py` | FastAPI 接口与静态页面服务 |
-| `Contribution Graph/dashboard/` | 看板（`index.html`、`app.js`、`style.css`）与审核页面（`review.html`、`review.js`、`review.css`） |
-| `Contribution Graph/token_engine.py` | Token 账本、委托结算与关系图投影（新引擎，尚未接入主流程） |
+| `Contribution Graph/dashboard/` | 看板、审核页与 Token 工作台的页面代码 |
+| `Contribution Graph/token_engine.py`、`token_store.py` | Token 规则、账本持久化与委托结算 |
+| `Contribution Graph/migrate_token_ledger.py` | 已核验历史贡献的 Token 迁移 |
 | `Contribution Graph/token_projection_demo.py` | 旧分数与 Token 余额的对照脚本 |
 | `Contribution Graph/schema.sql` | 数据库表、外键和索引 |
 | `Contribution Graph/data.json` | 合并后的项目数据快照 |
@@ -48,9 +74,11 @@ python3 -m venv .venv
 
 目前快照含 1 个项目、4 名成员、4 项任务、6 条贡献，以及对应的核验和争议记录。运行时以 `data.sqlite3` 为准；更改数据后，运行 `python3 export_json.py` 更新快照。命令行用法、API 路径和完整流程见 [详细文档](Contribution%20Graph/README.md)，审核页面的实现与验收步骤见 [B-实现说明.md](B-实现说明.md)。
 
-## 新旧引擎融合（阶段一）
+## 贡献与 Token
 
-团队正在把旧的贡献计分模型迁移到 `token_engine.py` 的 Token 账本模型。阶段一已完成**只读投影**：不写库、不改表，就能在同一份既有数据上同时看到旧分数与 Token 余额。
+旧贡献分保留为审核估值；匹配项目的 Token 账本建立后，看板成员卡片显示持久账本余额。审核会尝试铸币或冻结；若写入失败，看板列出待补同步贡献，可在 Token 工作台重试。两份 SQLite 文件不是同一事务，因此补同步状态需要留意。
+
+`data.sqlite3` 存放贡献与审核记录，`token.sqlite3` 存放持久 Token 账本。备份时应同时保存两份数据库，或在 `Contribution Graph/` 运行 `.venv/bin/python export_json.py` 导出包含账本的 JSON 快照。导入含 `token_ledger` 的快照会同时恢复 `token.sqlite3`。运行中的数据可能已与仓库里的示例 `data.json` 不同；更新快照前请确认要发布哪些数据。
 
 ```sh
 cd 'Contribution Graph'
@@ -70,4 +98,4 @@ cd 'Contribution Graph'
 .venv/bin/python demo_workflow.py
 ```
 
-前者运行 57 项自动化测试，覆盖评分引擎、SQLite 持久化、数据合并与导入、Dashboard 与审核 API、Token 账本及只读投影；后者在临时数据库中验证完整贡献流程，不修改网站数据。贡献规范见 [AGENTS.md](AGENTS.md)，历次变更见 [CHANGELOG.md](CHANGELOG.md)。
+前者覆盖评分引擎、SQLite 持久化、Dashboard 与审核 API、Token 账本及同步；后者在临时数据库中验证完整贡献流程，不修改网站数据。贡献规范见 [AGENTS.md](AGENTS.md)，历次变更见 [CHANGELOG.md](CHANGELOG.md)。

@@ -2,12 +2,12 @@ PRAGMA foreign_keys = ON;
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     name TEXT NOT NULL CHECK (length(trim(name)) > 0)
 );
 
 CREATE TABLE IF NOT EXISTS members (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     name TEXT NOT NULL CHECK (length(trim(name)) > 0)
 );
 
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS project_members (
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     project_id TEXT NOT NULL REFERENCES projects(id),
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
     task_value TEXT NOT NULL,
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE TABLE IF NOT EXISTS contributions (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     project_id TEXT NOT NULL REFERENCES projects(id),
     contributor_id TEXT NOT NULL,
     task_id TEXT NOT NULL,
@@ -46,15 +46,15 @@ CREATE TABLE IF NOT EXISTS contributions (
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     contribution_id TEXT NOT NULL REFERENCES contributions(id),
     submitted_by TEXT NOT NULL REFERENCES members(id),
     kind TEXT NOT NULL CHECK (kind IN ('NOTE', 'URL', 'IMAGE', 'GITHUB_PR')),
-    reference TEXT NOT NULL CHECK (length(trim(reference)) > 0)
+    reference TEXT NOT NULL CHECK (length(trim(reference)) > 0 AND length(reference) <= 4096)
 );
 
 CREATE TABLE IF NOT EXISTS verifications (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     contribution_id TEXT NOT NULL REFERENCES contributions(id),
     reviewer_id TEXT NOT NULL REFERENCES members(id),
     decision TEXT NOT NULL CHECK (decision IN ('CONFIRM', 'ADJUST', 'DISPUTE')),
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS verifications (
 );
 
 CREATE TABLE IF NOT EXISTS disputes (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY CHECK (length(trim(id)) > 0),
     contribution_id TEXT NOT NULL REFERENCES contributions(id),
     raised_by TEXT NOT NULL REFERENCES members(id),
     reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
@@ -74,4 +74,22 @@ CREATE INDEX IF NOT EXISTS contributions_by_project ON contributions(project_id)
 CREATE INDEX IF NOT EXISTS evidence_by_contribution ON evidence(contribution_id);
 CREATE INDEX IF NOT EXISTS verifications_by_contribution ON verifications(contribution_id);
 CREATE INDEX IF NOT EXISTS disputes_by_contribution ON disputes(contribution_id);
+CREATE TRIGGER IF NOT EXISTS evidence_project_member BEFORE INSERT ON evidence
+WHEN NOT EXISTS (
+    SELECT 1 FROM contributions AS c JOIN project_members AS pm
+    ON pm.project_id = c.project_id AND pm.member_id = NEW.submitted_by
+    WHERE c.id = NEW.contribution_id
+)
+BEGIN SELECT RAISE(ABORT, 'evidence submitter is not a project member'); END;
+
+CREATE TRIGGER IF NOT EXISTS verification_project_member BEFORE INSERT ON verifications
+WHEN NOT EXISTS (
+    SELECT 1 FROM contributions AS c JOIN project_members AS pm
+    ON pm.project_id = c.project_id AND pm.member_id = NEW.reviewer_id
+    WHERE c.id = NEW.contribution_id
+) OR EXISTS (
+    SELECT 1 FROM contributions AS c WHERE c.id = NEW.contribution_id
+    AND c.contributor_id = NEW.reviewer_id AND NEW.decision <> 'DISPUTE'
+)
+BEGIN SELECT RAISE(ABORT, 'reviewer is not an independent project member'); END;
 COMMIT;

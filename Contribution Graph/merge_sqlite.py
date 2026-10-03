@@ -8,6 +8,8 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+from contribution_store import ContributionStore
+
 
 TABLES = (
     "projects", "members", "project_members", "tasks", "contributions",
@@ -39,7 +41,7 @@ def merge(target, source):
     if target.resolve() == source.resolve() or not target.is_file() or not source.is_file():
         raise ValueError("target and source must be two existing, different SQLite files")
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     target_backup = target.with_name(f"{target.stem}.before-merge-{stamp}{target.suffix}")
     source_archive = source.with_name(f"{source.stem}.before-merge-{stamp}{source.suffix}")
     working = target.with_name(f"{target.stem}.merging-{stamp}{target.suffix}")
@@ -91,6 +93,7 @@ def merge(target, source):
                 violations = combined.execute("PRAGMA foreign_key_check").fetchall()
                 if violations or combined.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise ValueError(f"merged database failed integrity check: {violations}")
+        ContributionStore(working, read_only=True).validate_integrity()
         os.replace(working, target)
         os.replace(source, source_archive)
     finally:

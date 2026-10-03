@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from contribution_store import ContributionStore
 from dashboard_server import create_app
 from migrate_token_ledger import migrate_project
+from token_store import TokenStore
 
 
 def build_legacy(path):
@@ -30,7 +32,8 @@ class TokenApiTests(unittest.TestCase):
         self.legacy_db = Path(self.tmp.name) / "legacy.sqlite3"
         self.token_db = Path(self.tmp.name) / "token.sqlite3"
         build_legacy(self.legacy_db)
-        self.client = TestClient(create_app(self.legacy_db, self.token_db))
+        self.client = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key="test-key"),
+                                 headers={"X-Token-Admin-Key": "test-key"})
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -46,6 +49,172 @@ class TokenApiTests(unittest.TestCase):
             "mint_cap": "100", "acceptance_criteria": "Working engine",
         })
         self.assertEqual(response.status_code, 201, response.text)
+
+    def test_token_writes_require_admin_key(self):
+        client = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key=""))
+        response = client.post("/api/token/project", json={
+            "id": "fintech", "name": "FinTech", "treasury_id": "fintech-treasury",
+            "member_ids": ["alice", "bob", "charlie", "david"],
+        })
+        self.assertEqual(response.status_code, 503, response.text)
+
+    def test_admin_key_protects_review_that_writes_token_ledger(self):
+        self.create_ledger()
+        anonymous = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key="test-key"))
+        response = anonymous.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "bob", "decision": "CONFIRM",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.get("/api/contributions/core").json()["contribution"]["status"], "PENDING")
+
+    def test_migrate_from_page_api_preserves_history_and_refuses_overwrite(self):
+        self.client.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "bob", "decision": "CONFIRM",
+        })
+        response = self.client.post("/api/token/migrate?project_id=fintech", json={})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertTrue(response.json()["conservation"])
+        self.assertEqual(self.client.get("/api/token/ledger").json()["balances"]["alice"], 40.0)
+        self.assertEqual(self.client.post("/api/token/migrate?project_id=fintech", json={}).status_code, 400)
+
+    def test_manual_freeze_and_release_routes(self):
+        self.create_ledger()
+        self.client.post("/api/token/mint", json={
+            "event_id": "manual-mint", "task_id": "recommendation",
+            "recipient_id": "alice", "amount": "12", "evidence_hashes": ["manual:1"],
+        })
+        freeze = self.client.post("/api/token/freeze", json={
+            "sequences": [1], "reason": "Recheck evidence",
+        })
+        self.assertEqual(freeze.status_code, 201, freeze.text)
+        self.assertEqual(self.client.get("/api/token/ledger").json()["balances"]["alice"], 0.0)
+        release = self.client.post("/api/token/release", json={
+            "sequences": [1], "note": "Verified",
+        })
+        self.assertEqual(release.status_code, 201, release.text)
+        self.assertEqual(self.client.get("/api/token/ledger").json()["balances"]["alice"], 12.0)
+
+    def test_repeated_freeze_and_release_exposes_current_state(self):
+        self.create_ledger()
+        self.client.post("/api/token/mint", json={
+            "event_id": "cycle", "task_id": "recommendation", "recipient_id": "alice",
+            "amount": "12", "evidence_hashes": ["cycle-proof"],
+        })
+        for cycle in range(2):
+            self.assertEqual(self.client.post("/api/token/freeze", json={
+                "sequences": [1], "reason": "review",
+            }).status_code, 201)
+            event = self.client.get("/api/token/ledger").json()["events"][0]
+            self.assertTrue(event["frozen"])
+            self.assertIsNotNone(event["freezeTag"])
+            if cycle == 0:
+                self.assertEqual(self.client.post("/api/token/release", json={
+                    "sequences": [1], "note": "clear", "tag": event["freezeTag"],
+                }).status_code, 201)
+                self.assertFalse(self.client.get("/api/token/ledger").json()["events"][0]["frozen"])
+        self.assertEqual(self.client.post("/api/token/release", json={
+            "sequences": [1], "note": "clear",
+        }).status_code, 201)
+        self.assertFalse(self.client.get("/api/token/ledger").json()["events"][0]["frozen"])
+
+    def test_raise_cap_before_review_and_record_actual_support_reviewer(self):
+        self.create_ledger()
+        self.client.post("/api/token/mint", json={
+            "event_id": "seed", "task_id": "recommendation", "recipient_id": "bob",
+            "amount": "95", "evidence_hashes": ["seed-proof"],
+        })
+        blocked = self.client.post("/api/contributions/help/reviews", json={
+            "reviewer_id": "charlie", "decision": "CONFIRM",
+        })
+        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(self.client.get("/api/contributions/help").json()["contribution"]["status"], "PENDING")
+        raised = self.client.post("/api/token/tasks/recommendation/cap", json={"mint_cap": "110"})
+        self.assertEqual(raised.status_code, 200, raised.text)
+        approved = self.client.post("/api/contributions/help/reviews", json={
+            "reviewer_id": "charlie", "decision": "CONFIRM",
+        })
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(self.client.get("/api/token/contracts").json()[0]["approverIds"], ["charlie"])
+
+    def test_new_legacy_member_and_task_sync_into_token_ledger(self):
+        self.create_ledger()
+        member = self.client.post("/api/projects/fintech/members", json={
+            "id": "eve", "name": "Eve",
+        })
+        self.assertEqual(member.status_code, 201, member.text)
+        task = self.client.post("/api/projects/fintech/tasks", json={
+            "id": "docs", "name": "Docs", "task_value": "15",
+        })
+        self.assertEqual(task.status_code, 201, task.text)
+        self.assertIn("eve", self.client.get("/api/token/ledger").json()["memberIds"])
+        self.assertEqual(self.client.get("/api/token/tasks/docs/budget").json()["mintCap"], "15")
+
+    def test_manual_mint_link_requires_verified_contribution_values(self):
+        self.create_ledger()
+        base = {
+            "event_id": "core:mint", "task_id": "recommendation",
+            "recipient_id": "alice", "amount": "40",
+            "evidence_hashes": ["legacy:core"], "contribution_id": "core",
+        }
+        pending = self.client.post("/api/token/mint", json=base)
+        self.assertEqual(pending.status_code, 400)
+        self.assertEqual(self.client.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "bob", "decision": "CONFIRM",
+        }).status_code, 200)
+        duplicate = self.client.post("/api/token/mint", json=base)
+        self.assertEqual(duplicate.status_code, 400)
+        wrong = self.client.post("/api/token/mint", json={**base, "amount": "41"})
+        self.assertEqual(wrong.status_code, 400)
+
+    def test_dashboard_token_recognition_uses_persisted_balances(self):
+        self.create_ledger()
+        self.client.post("/api/token/mint", json={
+            "event_id": "native", "task_id": "recommendation",
+            "recipient_id": "alice", "amount": "5", "evidence_hashes": ["native-proof"],
+        })
+        dashboard = self.client.get("/api/projects/fintech/dashboard").json()
+        self.assertEqual(dashboard["tokenRecognition"]["balances"]["alice"], 5.0)
+        self.assertEqual(dashboard["members"][0]["totalScore"], 0.0)
+
+    def test_reconcile_mints_verified_contribution_missing_from_ledger(self):
+        self.create_ledger()
+        ContributionStore(self.legacy_db).review_contribution("core", "bob", "CONFIRM")
+        before = self.client.get("/api/projects/fintech/dashboard").json()
+        self.assertEqual(before["tokenRecognition"]["pendingContributions"], ["core"])
+        self.assertTrue(before["contributions"][0]["tokenPending"])
+        fixed = self.client.post("/api/token/reconcile", json={})
+        self.assertEqual(fixed.status_code, 200, fixed.text)
+        after = self.client.get("/api/projects/fintech/dashboard").json()
+        self.assertEqual(after["tokenRecognition"]["pendingContributions"], [])
+        self.assertEqual(after["tokenRecognition"]["balances"]["alice"], 40.0)
+        self.assertEqual(after["contributions"][0]["tokenEventId"], "core:mint")
+        self.assertEqual(after["contributions"][0]["tokenEventSequence"], 1)
+        self.assertFalse(after["contributions"][0]["tokenFrozen"])
+
+    def test_reconcile_historical_support_without_independent_reviewer_mints_direct(self):
+        self.create_ledger()
+        ContributionStore(self.legacy_db).review_contribution("help", "alice", "CONFIRM")
+        response = self.client.post("/api/token/reconcile", json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertIn("help:mint", [event["id"] for event in ledger["events"]])
+        self.assertEqual(self.client.get("/api/token/contracts").json(), [])
+        dashboard = self.client.get("/api/projects/fintech/dashboard").json()
+        help_record = next(item for item in dashboard["contributions"] if item["id"] == "help")
+        self.assertEqual(help_record["tokenEventId"], "help:mint")
+
+    def test_token_workspace_is_served(self):
+        page = self.client.get("/token.html")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Token 工作台", page.text)
+        self.assertEqual(self.client.get("/token.js").status_code, 200)
+
+    def test_token_tasks_read_model(self):
+        self.create_ledger()
+        response = self.client.get("/api/token/tasks")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["acceptanceCriteria"], "Working engine")
+        self.assertEqual(response.json()[0]["mintCap"], "100")
 
     def test_ledger_routes_404_before_creation(self):
         for path in ("/api/token/ledger", "/api/token/graph", "/api/token/contracts"):
@@ -147,6 +316,27 @@ class TokenApiTests(unittest.TestCase):
         self.assertEqual(contracts[0]["verifiedMintValue"], 60.0)
         self.assertEqual(contracts[0]["approverIds"], ["charlie"])
 
+    def test_contract_dispute_path_stops_settlement(self):
+        self.create_ledger()
+        response = self.client.post("/api/token/contracts", json={
+            "id": "disputed", "task_id": "recommendation", "principal_id": "alice",
+            "contractor_id": "bob", "contract_price": "20", "maximum_mint_value": "30",
+        })
+        self.assertEqual(response.status_code, 201, response.text)
+        for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "DISPUTED", "FROZEN"):
+            response = self.client.post("/api/token/contracts/disputed/advance", json={"status": status})
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/api/token/contracts").json()[0]["status"], "FROZEN")
+        response = self.client.post("/api/token/contracts/disputed/settle", json={
+            "verified_mint_value": "20", "evidence_hashes": ["sha:disputed"],
+            "approver_ids": ["charlie"],
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.client.get("/api/token/ledger").json()["totalSupply"], 0.0)
+        for status in ("DELIVERED", "VERIFIED"):
+            response = self.client.post("/api/token/contracts/disputed/advance", json={"status": status})
+            self.assertEqual(response.status_code, 200, response.text)
+
     def test_confirm_mints_into_token_ledger(self):
         self.create_ledger()
         response = self.client.post("/api/contributions/core/reviews", json={
@@ -233,7 +423,7 @@ class TokenApiTests(unittest.TestCase):
         self.assertEqual(frozen["kind"], "FREEZE")
         ledger = self.client.get("/api/token/ledger").json()
         self.assertEqual(ledger["balances"]["alice"], 0.0)
-        self.assertEqual(ledger["totalSupply"], 40.0)  # supply unchanged by FREEZE
+        self.assertEqual(ledger["totalSupply"], 0.0)
         resolve = self.client.post("/api/contributions/core/resolve", json={
             "resolved_by": "bob", "resolution": "agreed", "completion": "1",
         })
@@ -257,10 +447,27 @@ class TokenApiTests(unittest.TestCase):
         self.assertEqual(resolve.status_code, 200, resolve.text)
         body = resolve.json()
         correction = body["tokenResolved"]["correction"]
-        self.assertEqual(correction["kind"], "REFUND")
+        self.assertEqual(correction["kind"], "TRANSFER")
+        self.assertEqual(correction["destinationId"], "fintech-treasury")
         self.assertEqual(correction["amount"], 8.0)
         ledger = self.client.get("/api/token/ledger").json()
         self.assertEqual(ledger["balances"]["alice"], 32.0)
+        self.assertEqual(ledger["totalSupply"], 32.0)
+
+    def test_resolve_to_zero_returns_all_tokens_to_treasury(self):
+        self.create_ledger()
+        self.client.post("/api/contributions/core/reviews",
+                         json={"reviewer_id": "bob", "decision": "CONFIRM"})
+        self.client.post("/api/contributions/core/reviews",
+                         json={"reviewer_id": "bob", "decision": "DISPUTE", "note": "recheck"})
+        response = self.client.post("/api/contributions/core/resolve", json={
+            "resolved_by": "bob", "resolution": "no accepted work", "completion": "0",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["tokenResolved"]["correction"]["amount"], 40.0)
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertEqual(ledger["balances"]["alice"], 0.0)
+        self.assertEqual(ledger["totalSupply"], 0.0)
 
     def test_corrupt_token_db_never_fails_committed_legacy_review(self):
         self.token_db.write_bytes(b"corrupted-not-sqlite")
@@ -324,7 +531,8 @@ class MigrationTests(unittest.TestCase):
 
     def test_migration_preserves_balances_and_conservation(self):
         build_legacy(self.legacy_db)
-        client = TestClient(create_app(self.legacy_db, self.token_db))
+        client = TestClient(create_app(self.legacy_db, self.token_db, token_admin_key="test-key"),
+                            headers={"X-Token-Admin-Key": "test-key"})
         client.post("/api/token/project", json={
             "id": "fintech", "name": "FinTech", "treasury_id": "fintech-treasury",
             "member_ids": ["alice", "bob", "charlie", "david"],
@@ -368,6 +576,25 @@ class MigrationTests(unittest.TestCase):
         migrated_db = Path(self.tmp.name) / "migrated.sqlite3"
         migrate_project(self.legacy_db, migrated_db, "fintech")
         self.assertEqual(self.legacy_db.read_bytes(), before)
+
+    def test_migration_keeps_decimal_precision_for_commission_and_cap(self):
+        store = ContributionStore(self.legacy_db)
+        store.create_project("fintech", "FinTech")
+        for member in ("alice", "bob", "charlie"):
+            store.add_member("fintech", member, member.title())
+        store.add_task("fintech", "task", "Task", "0.1", "Accepted work")
+        amount = "0.123456789012345678901"
+        store.submit_contribution("fintech", "help", "bob", "task", "SUPPORT",
+                                  "Helped Alice", support_value=amount,
+                                  helped_member_id="alice")
+        store.review_contribution("help", "charlie", "CONFIRM")
+        migrate_project(self.legacy_db, self.token_db, "fintech")
+        token = TokenStore(self.token_db)
+        self.assertEqual(token.ledger.tasks["task"].mint_cap, Decimal(amount))
+        self.assertEqual(token.ledger.contracts["help:commission"].contract_price,
+                         Decimal(amount))
+        self.assertEqual(token.ledger.contracts["help:commission"].verified_mint_value,
+                         Decimal(amount))
 
     def test_migration_refuses_to_overwrite(self):
         build_legacy(self.legacy_db)

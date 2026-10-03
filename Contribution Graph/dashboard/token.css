@@ -1,0 +1,73 @@
+[hidden]{display:none!important}
+.token-section{margin-bottom:20px;scroll-margin-top:20px}
+.token-section>.section-head{align-items:center;flex-wrap:wrap}
+.token-section>.section-head>div{min-width:0;flex:1 1 320px}
+.token-section>.section-head>button,.token-section>.section-head>label{flex:none}
+.token-section>.section-head>button{min-height:38px;padding:0 14px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--accent-ink);font-size:12px;font-weight:700}
+.token-section>.section-head>button:hover{border-color:var(--accent);background:var(--accent-soft)}
+.token-setup{display:grid;gap:16px;margin-bottom:20px}
+.token-setup>label,.token-form label,.settle-form label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:650}
+.token-setup>label{max-width:360px}
+.token-setup details{border-top:1px solid var(--line);padding-top:14px}
+.token-setup summary{color:var(--accent-ink);font-size:13px;font-weight:700;cursor:pointer}
+.projection{padding:12px 14px;border-radius:9px;background:var(--surface-soft);color:var(--ink);font-size:12px}
+.token-notice{margin:0 0 20px;padding:13px 16px;border:1px solid var(--line);border-radius:10px;background:var(--accent-soft);color:var(--accent-ink);font-size:13px}
+.token-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;margin-top:20px;padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft)}
+.token-form h3{grid-column:1/-1;margin:0;font-size:15px}
+.token-form .wide{grid-column:1/-1}
+.token-form input,.token-form select,.token-form textarea,.token-setup>label select,.settle-form input,.settle-form select,.settle-form textarea,#event-filter{width:100%;min-width:0;min-height:38px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);font-size:12px}
+.token-form textarea,.settle-form textarea{resize:vertical}
+.token-form button,.token-setup>button,.contract-action button,.settle-form button{justify-self:start;min-height:38px;padding:0 15px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:#fff;font-size:12px;font-weight:700;white-space:nowrap}
+.token-form button:hover:not(:disabled),.token-setup>button:hover:not(:disabled),.contract-action button:hover:not(:disabled),.settle-form button:hover:not(:disabled){filter:brightness(.88)}
+.token-form button:active:not(:disabled),.contract-action button:active:not(:disabled){transform:translateY(1px)}
+.token-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.token-form-grid .token-form{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;margin:0}
+.balance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 24px}
+.balance-row{display:flex;justify-content:space-between;gap:12px;padding:15px 0;border-bottom:1px solid var(--line);font-size:13px}
+.balance-row strong,.event-amount{font-variant-numeric:tabular-nums;font-size:18px}
+#debt-list button{min-height:34px;padding:0 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:#fff;font-size:12px;font-weight:700}
+.token-list{display:grid;gap:0}
+.token-row{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:18px 0;border-bottom:1px solid var(--line)}
+.token-row>div:first-child{min-width:0;overflow-wrap:anywhere}
+.token-row:last-child{border-bottom:0}
+.token-row strong{font-size:13px}
+.token-row small{display:block;margin-top:5px;color:var(--subtle);font-size:11px;overflow-wrap:anywhere}
+.token-row p{margin:7px 0 0;color:var(--muted);font-size:12px}
+.cap-form{display:flex;align-items:end;gap:8px;margin-top:10px}
+.cap-form label{display:grid;gap:4px;color:var(--muted);font-size:11px}
+.cap-form input{max-width:140px;min-height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
+.cap-form button{min-height:34px;padding:0 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:#fff}
+.cap-form button:hover,#debt-list button:hover{filter:brightness(.88)}
+.budget-values{display:grid;grid-template-columns:repeat(4,minmax(58px,1fr));gap:16px;margin:0}
+.budget-values div{display:grid;gap:5px}
+.budget-values dt{color:var(--subtle);font-size:11px}
+.budget-values dd{margin:0;font-size:14px;font-weight:750;font-variant-numeric:tabular-nums}
+.contract-row{display:grid;grid-template-columns:1fr auto}
+.contract-action{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:10px}
+.contract-status{padding:7px 10px;border-radius:8px;background:var(--accent-soft);color:var(--accent-ink);font-size:11px;font-weight:700}
+.settle-form{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:16px;border:1px solid var(--line);border-radius:9px;background:var(--surface-soft)}
+.settle-form button{grid-column:1/-1}
+.event-amount{color:var(--accent-ink)}
+.event-row details{margin-top:9px;color:var(--muted);font-size:11px}
+.event-row summary{cursor:pointer;color:var(--accent-ink)}
+.event-row.is-focused{border:1px solid var(--accent);border-radius:9px;padding:18px;background:var(--accent-soft);scroll-margin-top:20px}
+.graph-summary{margin-bottom:16px;color:var(--muted);font-size:12px}
+.token-graph-wrap{overflow-x:auto;margin-bottom:16px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft)}
+#token-graph{display:block;width:980px;min-height:220px;color:var(--ink)}
+.graph-line{stroke:var(--accent);stroke-width:1.5;opacity:.65}
+.graph-node rect{fill:var(--surface);stroke:var(--line)}
+.graph-node text{fill:var(--ink);font-family:inherit}
+.graph-node-kind{font-size:9px;fill:var(--subtle)!important}
+.graph-node-label{font-size:12px;font-weight:700}
+.graph-nodes{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.graph-nodes span{display:grid;gap:4px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-soft);font-size:12px}
+.graph-nodes span{overflow-wrap:anywhere}
+.graph-nodes small{color:var(--subtle);font-size:10px}
+.graph-edge{display:grid;grid-template-columns:minmax(0,1fr) minmax(100px,auto) minmax(0,1fr);align-items:center;gap:18px;padding:12px 0;border-bottom:1px solid var(--line);font-size:12px}
+.graph-edge span{overflow-wrap:anywhere}
+.graph-edge span:last-child{text-align:right}
+.graph-edge-kind{color:var(--accent-ink);font-size:11px;text-align:center}
+.hint{margin:0;color:var(--muted);font-size:11px}
+@media(prefers-color-scheme:dark){.token-form button,.token-setup>button,.contract-action button,.settle-form button{color:#103c3d}}
+@media(max-width:900px){.token-form-grid{grid-template-columns:1fr}.budget-values{grid-template-columns:repeat(2,minmax(58px,1fr))}}
+@media(max-width:650px){.token-form,.token-form-grid .token-form,.settle-form{grid-template-columns:1fr}.token-form .wide,.settle-form button{grid-column:1}.balance-list{grid-template-columns:1fr}.token-row{align-items:flex-start;flex-direction:column;gap:12px}.contract-row{grid-template-columns:1fr}.settle-form{grid-column:1}.contract-action{justify-content:flex-start}.budget-values{width:100%;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.graph-edge{grid-template-columns:1fr;gap:5px}.graph-edge span:last-child,.graph-edge-kind{text-align:left}.cap-form{flex-wrap:wrap}.token-section>.section-head>button{white-space:normal;text-align:left}}

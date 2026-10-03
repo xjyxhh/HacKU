@@ -14,7 +14,9 @@ class ReviewApiTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "shared.json"
-        self.client = TestClient(create_app(self.path))
+        self.client = TestClient(create_app(self.path, self.path.with_name("token.sqlite3"),
+                                           token_admin_key="test-key"),
+                                 headers={"X-Token-Admin-Key": "test-key"})
         self.addCleanup(self.client.close)
         self.client.post("/api/projects", json={"id": "fintech", "name": "Team"})
         for member in ("alice", "bob"):
@@ -86,7 +88,8 @@ class ReviewApiTests(unittest.TestCase):
                 "submitted_by": "alice", "kind": kind, "reference": reference,
             })
             self.assertEqual(response.status_code, 201)
-        with TestClient(create_app(self.path)) as reloaded:
+        with TestClient(create_app(self.path, self.path.with_name("token.sqlite3"), token_admin_key="test-key"),
+                        headers={"X-Token-Admin-Key": "test-key"}) as reloaded:
             record = reloaded.get("/api/contributions/core").json()
         self.assertEqual([item["kind"] for item in record["evidence"]], ["NOTE", "URL", "IMAGE", "GITHUB_PR"])
         self.assertEqual(record["currentScore"], 0)
@@ -110,7 +113,8 @@ class ReviewApiTests(unittest.TestCase):
             "resolved_by": "bob", "resolution": "Agreed on five points", "support_value": 5,
         })
         self.assertEqual(response.status_code, 200)
-        with TestClient(create_app(self.path)) as reloaded:
+        with TestClient(create_app(self.path, self.path.with_name("token.sqlite3"), token_admin_key="test-key"),
+                        headers={"X-Token-Admin-Key": "test-key"}) as reloaded:
             dashboard = reloaded.get("/api/dashboard").json()
             record = reloaded.get("/api/contributions/support").json()
         self.assertEqual(dashboard["members"][0]["totalScore"], 5)
