@@ -72,6 +72,34 @@ curl -X POST http://127.0.0.1:8000/api/contributions/c3/reviews \
 
 服务默认仅监听本机。当前接口使用请求中的成员 ID，尚无登录身份验证；若要开放给外部用户，需先加入认证，并将 JSON 存储改为支持多进程事务的数据库。
 
+## B：贡献审核页面
+
+启动服务后打开 `http://127.0.0.1:8000/review.html`，或点击看板顶部的“贡献审核”。选择当前操作成员和贡献，即可添加证据、确认、预览并调整分数、提出争议、解决争议，以及查看历史记录。成员下拉框是演示身份选择，没有登录认证。
+
+- `PENDING`：其他成员可以确认或调整；项目成员可以填写原因提出争议。
+- `VERIFIED`：可以提出争议。
+- `DISPUTED`：其他成员填写结论并预览最终分数后解决。
+- `RESOLVED`：查看最终结果和处理记录。
+- `IMAGE`、`GITHUB_PR` 等证据保存文本或链接引用，没有文件上传。
+- 调整前先点击“预览分数”；分数实际变化后才能提交调整。确认使用原有提议分值。
+- 页面显示的当前分数、提议分值和调整预览均由后端评分引擎提供。新增 `POST /api/contributions/{contribution_id}/preview` 接口接受 `completion`、`support_value`、`quality`，只计算、不保存。
+- 写入后重新获取贡献详情和项目数据，并通知同源浏览器中已经打开的看板自动刷新。也可以手动点击“刷新数据”。
+
+在仓库根目录使用虚拟环境启动（本机已创建 `.venv` 并安装依赖）：
+
+```powershell
+.\.venv\Scripts\python.exe "Contribution Graph\dashboard_server.py"
+```
+
+如需单独演示，先生成一个不存在的文件，再让 B/C 使用同一份副本：
+
+```powershell
+.\.venv\Scripts\python.exe "Contribution Graph\seed_dashboard.py" "output\b-demo.json"
+.\.venv\Scripts\python.exe "Contribution Graph\dashboard_server.py" --db "output\b-demo.json"
+```
+
+详细实现与验收步骤见仓库根目录的 `B-实现说明.md`。
+
 ## 手动操作全套流程
 
 每条命令都使用同一个 `--db walkthrough.json`。若文件已含同名 ID，请换一个文件名或 ID。

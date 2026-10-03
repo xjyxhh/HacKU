@@ -130,4 +130,9 @@ async function refresh() {
 $("refresh").addEventListener("click", refresh);
 $("status-filter").addEventListener("change", renderContributions);
 window.matchMedia("(max-width: 650px)").addEventListener("change", () => { if (currentData) renderGraph(currentData); });
+// B publishes a change after a successful write; other dashboard tabs reload the shared data.
+window.addEventListener("storage", (event) => {
+  if (event.key === "contribution-graph-update") refresh();
+});
+window.addEventListener("focus", refresh);
 refresh();
