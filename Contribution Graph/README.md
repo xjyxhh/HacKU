@@ -4,6 +4,27 @@
 
 已提供撤回申请与独立成员决定 API、退出预览和申请 API、站点管理员项目归档预览及归档/恢复 API。撤回历史保留，撤回后看板有效分数为 0；归档可恢复且不物理删除。/ Withdrawal requests and independent decisions, exit preview/request endpoints, and administrator archive preview/archive/restore endpoints are available. Withdrawal history is retained and its dashboard effective score becomes zero. Archival is recoverable and retains records.
 
+## 账号、角色与工作区
+
+新账号从 `/register.html` 注册，默认只创建全局成员账号，不加入任何现有项目。邮箱只有验证成功后才可用于登录或邀请；SMTP 未配置时，页面会说明邮箱未验证，成员 ID 登录仍可使用。已有成员 ID 登录继续有效。`/profile.html` 支持修改显示名、头像 HTTPS 链接和简介；邮箱变更需要重新验证。
+
+登录后可在 `/workspace.html` 查看自己的项目并自助建项。创建者会在贡献数据库事务中成为新项目的 Owner，随后初始化该项目独立 Token 账本；若账本初始化失败，项目保留为 `TOKEN_SETUP_PENDING`，可从 Token 工作台重试。站点管理员身份不会自动成为项目成员。
+
+| 项目角色 | 主要权限 |
+|---|---|
+| Owner | 管理项目成员和角色、项目级配置、账本维护及退出/归档处理 |
+| Member | 提交贡献、承接委托、转出本人 Token |
+| Verifier | 独立核验、批准非本人参与的委托及争议处理 |
+| Viewer | 查看项目公开内容与本人工作区信息 |
+
+Owner 可按已验证邮箱或成员 ID 邀请已注册账号并指定角色；已有项目成员若尚未开通账号，继续使用原有 48 小时一次性邀请链接。角色变更会记录操作者、前后角色和时间，并阻止降级最后一名有效 Owner。
+
+工作区展示本人项目、角色、成员/任务数量、Token 可用与冻结余额、账本状态，以及需要本人处理的贡献审核、委托交付/核验、成员退出等待办。账本读取失败会明确显示不可用，不会伪装成零余额。
+
+## 固定公开 Demo 与 Token 图
+
+`/demo.html` 和 `GET /api/demo` 提供不读取生产数据库的只读固定示例。Demo 标明数据不代表真实余额，并提供注册、看板和公平规则入口。Token 工作台的图可切换价值创造、Token 流转、协作、验证与信任视图；它们筛选当前项目关系，不改变账本记录。
+
 项目账本位于 `token-ledgers/<项目 ID 的完整 SHA-256>.sqlite3`；旧 `token.sqlite3` 保留为迁移备份，旧 `/api/token/...` 只指向原项目。撤回账务先回收可用 Token，不足部分登记 `withdraw:<贡献 ID>` 债务；成员退出再清偿已有债务并将余额转入该项目金库。归档会保存余额与债务预览，待处理 outbox 必须先调和。/ Project ledgers use full SHA-256 filenames under `token-ledgers/`. The old ledger remains a migration backup and legacy routes stay bound to its original project. Withdrawal recovers available Tokens and records a named debt for any shortfall. Exit then collects outstanding debt and sweeps remaining balance to the project treasury. Archival stores a debt snapshot and requires all outbox work to finish first.
 
 看板的“项目生命周期”区显示退出与归档预览、待调和账务、已归档项目和恢复入口；Token 工作台根据项目选择器读取对应账本。导出 JSON 会收集所有项目账本，导入新目录时恢复全部账本。/ The dashboard lifecycle section exposes exit and archive previews, pending accounting, archived projects, and restore controls. The Token workbench follows the selected project. JSON export and import include every project ledger.
@@ -40,6 +61,8 @@ python3 contribution_store.py --db workflow.sqlite3 record c4
 | 争议解决，Support 最终价值为 7 | 40 | 20 | 3 | 11 |
 
 ## C：打开 Dashboard、录入贡献与关系图
+
+macOS 完成下方依赖安装后，可双击 [`启动本地.command`](启动本地.command) 打开隔离的本地演示；终端窗口按 `Control+C` 停止。首次使用仍需执行下方虚拟环境和依赖安装步骤。
 
 首次运行时，创建虚拟环境、安装依赖，并启动读取统一数据库的网站：
 

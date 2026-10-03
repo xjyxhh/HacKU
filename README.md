@@ -12,9 +12,9 @@
 
 ## 在线访问
 
-[PocketBay 上的 HacKU](https://hacku.pocketbay.app) · [贡献审核](https://hacku.pocketbay.app/review.html) · [Token 工作台](https://hacku.pocketbay.app/token.html)
+[PocketBay 上的 HacKU](https://hacku.pocketbay.app) · [注册](https://hacku.pocketbay.app/register.html) · [我的工作区](https://hacku.pocketbay.app/workspace.html) · [公开 Demo](https://hacku.pocketbay.app/demo.html) · [贡献审核](https://hacku.pocketbay.app/review.html) · [Token 工作台](https://hacku.pocketbay.app/token.html)
 
-PocketBay 使用 `/data` 持久卷保存贡献与 Token 两份 SQLite 数据库。账号写入由成员会话认证；首次部署可为一个全局站点管理员生成一次性引导账号文件，站点管理员不自动加入任何项目。邀请链接由项目管理员创建并自行交给成员。公平规则见 `/fairness.html`。
+应用支持按项目分离的 Token SQLite 账本。当前 PocketBay 项目尚未接入托管数据库；重新部署前应备份线上数据并确认运行环境是否保留 `/data`。账号写入由成员会话认证；首次部署可为一个全局站点管理员生成一次性引导账号文件，站点管理员不自动加入任何项目。邀请链接由项目 Owner 创建并自行交给成员。公平规则见 [FAIRNESS.md](FAIRNESS.md)。
 
 部署压缩包可用 `python3 scripts/package_pocketbay.py /tmp/hacku-pocketbay.zip` 生成。脚本仅打包应用源码、页面及数据快照，并将压缩包中的应用目录命名为 `contribution_graph`，以兼容 PocketBay 当前对带空格目录生成的构建路径。
 
@@ -30,8 +30,15 @@ PocketBay 使用 `/data` 持久卷保存贡献与 Token 两份 SQLite 数据库�
 - **Token 认定**：启用匹配项目的账本后，看板以持久 Token 余额显示成员认定结果，并保留旧贡献分作对照；漏铸可从工作台补同步。
 - **账本操作**：迁移已核验的历史贡献，管理任务预算、直接铸币、转账、委托合约、冻结与释放、事件记录及待追偿债务。
 - **数据存储**：旧贡献与 Token 账本分别使用 SQLite 文件，默认服务地址为 `http://127.0.0.1:8000`。
+- **账号与工作区**：可公开注册并用成员 ID 登录；已验证邮箱也可登录。工作区显示本人项目和项目角色，自助建项者成为该项目 Owner。邮箱验证邮件需要配置 SMTP 环境变量。
+- **项目角色**：Owner 管理成员和角色；Member 提交贡献及承接委托；Verifier 独立核验和批准；Viewer 只查看。角色仅作用于单个项目，站点管理员是独立的运维身份。
+- **个人资料与邀请**：个人资料支持显示名、头像 HTTPS 链接和简介。Owner 可通过已验证邮箱或成员 ID 邀请已有账号；没有账号的既有项目成员继续使用 48 小时一次性邀请链接。
+- **公开示例**：`/demo.html` 展示固定演示数据，不读取或写入真实项目和账本。
+- **Token 图视图**：Token 工作台提供价值创造、Token 流转、协作、验证与信任四类关系筛选。
 
 ## 快速开始
+
+macOS 可双击 `Contribution Graph/启动本地.command` 启动本地演示，浏览器会在服务就绪后自动打开；在弹出的终端按 `Control+C` 停止。此入口使用独立的 `.local-demo/` 数据目录，不会改写仓库中的 SQLite 数据。首次使用前，需按下面步骤创建 `.venv` 并安装依赖。
 
 需要 Python 3。克隆仓库后，在项目目录中执行：
 
@@ -54,7 +61,7 @@ python3 -m venv .venv
 
 身份库在应用启动时以增量方式添加。使用 `python3 Contribution\ Graph/manage_auth.py bootstrap-seed --db /绝对路径/data.sqlite3 --member 成员ID --out /tmp/hacku-auth-seed.json` 生成只含 scrypt 哈希的全局管理员引导文件（旧的 `--project` 参数仍可保留），并通过部署包的 `--bootstrap-seed` 选项传入。部署后移除引导文件。密码至少 8 位，并包含英文大写、小写字母和数字；登录使用 HttpOnly 会话 Cookie 和 CSRF 令牌。
 
-新部署必须先按上文配置一次性管理员引导文件。成员登录后才能写入；项目与账本管理操作还需项目管理员权限。会话使用 HttpOnly Cookie，同源写入附带 CSRF 校验。
+新部署必须先按上文配置一次性管理员引导文件。会话使用 HttpOnly Cookie，同源写入附带 CSRF 校验。SMTP 可用 `HACKU_SMTP_HOST`、`HACKU_SMTP_FROM`、可选的 `HACKU_SMTP_PORT`、`HACKU_SMTP_USER` 和 `HACKU_SMTP_PASSWORD` 配置；未配置时注册邮箱仍可用于登录，但邮箱邀请需先完成验证，成员 ID 也可用于登录。
 
 ## 推荐使用流程
 
@@ -91,6 +98,8 @@ Token 迁移会跳过待核验和争议中的贡献；已核验贡献无法完�
 `data.sqlite3` 存放贡献与审核记录，`token.sqlite3` 存放持久 Token 账本。备份时应同时保存两份数据库，或在 `Contribution Graph/` 运行 `.venv/bin/python export_json.py` 导出包含账本的 JSON 快照。导入含 `token_ledger` 的快照会同时恢复 `token.sqlite3`。运行中的数据可能已与仓库里的示例 `data.json` 不同；更新快照前请确认要发布哪些数据。
 
 写接口使用成员会话、同源 `Origin` 与 CSRF 校验；管理员通过一次性 scrypt seed 初始化，项目管理员可以邀请已加入项目且没有账号的成员。委托需第三方真实批准。已结算争议须先冻结合约付款，再由非当事人管理员释放、退款或拆分。规则与边界见 [FAIRNESS.md](FAIRNESS.md)。
+
+每个项目的 Token 数据仍保存在按完整 SHA-256 项目 ID 命名的独立 SQLite 文件中；备份时同时保存 `data.sqlite3`、旧 `token.sqlite3` 和全部 `token-ledgers/*.sqlite3`，使用 [backup_restore.py](Contribution%20Graph/backup_restore.py) 在副本上演练恢复。两人项目因缺少独立第三人不能结算委托。发布前的真实数据库备份、恢复和浏览器验收须由部署操作者在维护时段执行；本次代码任务不会替代生产演练。
 
 ```sh
 cd 'Contribution Graph'

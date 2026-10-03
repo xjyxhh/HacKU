@@ -117,6 +117,14 @@ main:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
 .invite-panel input { min-height:40px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); }
 .invite-panel button { min-height:40px; padding:0 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:white; font-weight:700; }
 .invite-panel a { overflow-wrap:anywhere; }
+.auth-page { max-width: 720px; margin-inline: auto; }
+.auth-page form { display:grid; gap:14px; margin-top:18px; }
+.auth-page label { display:grid; gap:7px; color:var(--muted); font-size:13px; }
+.auth-page input,.auth-page textarea { min-height:40px; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); font:inherit; }
+.auth-page button,.workspace-card a { width:fit-content; min-height:38px; padding:9px 14px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:white; font-weight:700; text-decoration:none; }
+.workspace-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); gap:16px; margin-block:18px; }
+.workspace-card h2 { margin-top:0; }
+.workspace-card p { overflow-wrap:anywhere; }
 .auth-status { color:var(--muted); font-size:12px; white-space:nowrap; }
 .auth-dialog { width:min(420px, calc(100% - 32px)); padding:24px; border:1px solid var(--line); border-radius:14px; background:var(--surface); color:var(--ink); }
 .auth-dialog::backdrop { background:rgb(10 24 23 / .52); }
@@ -353,3 +361,62 @@ footer { padding-right: 40px; padding-left: 40px; }
 }
 @media (max-width: 380px) { .filter-bar { grid-template-columns: 1fr; } .summary > div { padding: 15px; } .summary strong { font-size: 25px; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
+
+/* Shared action language across dashboard, account, review, and token pages. */
+:root {
+  --action-ink: #ffffff;
+  --action-radius: 10px;
+  --action-shadow: 0 4px 12px rgb(18 107 92 / .13);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --action-ink: #102b28; --action-shadow: 0 4px 12px rgb(0 0 0 / .2); }
+}
+button, .review-link, .nav-link, .workspace-card a, .settings summary, .settings-action {
+  border-radius: var(--action-radius);
+  transition: background-color .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+button:not(.member, .task, .row-select, .back-to-top, .queue-item, :disabled):active,
+.review-link:active, .nav-link:active, .workspace-card a:active, .settings summary:active { transform: translateY(1px); }
+.entry-form button[type="submit"], .invite-panel button, .auth-page button,
+.auth-dialog button[type="submit"], .workspace-card a {
+  min-height: 40px;
+  border: 1px solid var(--accent);
+  border-radius: var(--action-radius);
+  background: var(--accent);
+  color: var(--action-ink);
+  box-shadow: var(--action-shadow);
+}
+.entry-form button[type="submit"]:hover:not(:disabled), .invite-panel button:hover:not(:disabled),
+.auth-page button:hover:not(:disabled), .auth-dialog button[type="submit"]:hover:not(:disabled),
+.workspace-card a:hover { background: var(--accent-ink); border-color: var(--accent-ink); color: var(--action-ink); }
+.refresh-button, .review-link, .nav-link, .settings-action, .auth-dialog #auth-cancel,
+.lifecycle-card button, .member-exit-request button, .unwind-form button, .clear-button {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: var(--action-radius);
+  background: var(--surface);
+  color: var(--accent-ink);
+  font-weight: 700;
+  box-shadow: none;
+}
+.refresh-button:hover:not(:disabled), .review-link:hover, .nav-link:hover,
+.settings-action:hover:not(:disabled), .auth-dialog #auth-cancel:hover,
+.lifecycle-card button:hover:not(:disabled), .member-exit-request button:hover:not(:disabled),
+.unwind-form button:hover:not(:disabled), .clear-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.auth-dialog button[type="submit"] { background: var(--accent); color: var(--action-ink); }
+.member-remove { border-radius: var(--action-radius); }
+.member-remove:hover:not(:disabled) { border-color: #b34d4d; background: #fff1f1; }
+.page-nav a[aria-current="page"] { background: var(--accent-soft); border-color: var(--line); color: var(--accent-ink); box-shadow: inset 3px 0 var(--accent); }
+.settings-menu a { min-height: 34px; display: flex; align-items: center; padding: 0 10px; border-radius: 8px; color: var(--accent-ink); text-decoration: none; font-size: 12px; font-weight: 700; }
+.settings-menu a:hover { background: var(--accent-soft); }
+dialog { overscroll-behavior: contain; }
+@media (max-width: 650px) {
+  .shell { width: 100%; }
+  .topbar { padding-inline: 20px; }
+  main { padding-inline: 20px; }
+  footer { padding-inline: 20px; }
+}

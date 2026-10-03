@@ -21,15 +21,20 @@ class AuthenticatedClient(TestClient):
         salt = b"test-auth-fixture"
         digest = hashlib.scrypt(self.password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
         with sqlite3.connect(self.db_path) as conn:
+            account_columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_accounts)")}
+            if not account_columns:
+                return
             conn.execute("INSERT OR IGNORE INTO members(id,name) VALUES(?,?)", ("_test_admin", "Test admin"))
             conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1)",
                          ("_test_admin", salt, digest))
             rows = conn.execute("SELECT project_id,member_id FROM project_members").fetchall()
             for project_id, member_id in rows:
-                conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1)",
+                conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,0)",
                              (member_id, salt, digest))
-                conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES(?,?)",
-                             (project_id, member_id))
+                legacy_admin = conn.execute("SELECT 1 FROM auth_project_admins WHERE project_id=? AND member_id=?",(project_id,member_id)).fetchone()
+                role = "OWNER" if legacy_admin else "MEMBER"
+                conn.execute("INSERT OR IGNORE INTO project_member_roles(project_id,member_id,role) VALUES(?,?,?)",
+                             (project_id, member_id, role))
 
     def _login(self, member_id):
         self._ensure_accounts()
@@ -41,7 +46,7 @@ class AuthenticatedClient(TestClient):
     def post(self, url, *args, **kwargs):
         body = kwargs.get("json")
         if isinstance(body, dict):
-            actor = next((body[key] for key in ("contributor_id", "submitted_by", "reviewer_id", "resolved_by")
+            actor = next((body[key] for key in ("contributor_id", "submitted_by", "reviewer_id", "resolved_by", "source_id", "principal_id")
                           if isinstance(body.get(key), str)), None)
             if actor:
                 with sqlite3.connect(self.db_path) as conn:
@@ -56,8 +61,8 @@ class AuthenticatedClient(TestClient):
                 salt = b"test-auth-fixture"
                 digest = hashlib.scrypt(self.password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
                 with sqlite3.connect(self.db_path) as conn:
-                    conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1)",
+                    conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,0)",
                                  (member_id, salt, digest))
-                    conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES(?,?)",
+                    conn.execute("INSERT OR IGNORE INTO project_member_roles(project_id,member_id,role) VALUES(?,?,'MEMBER')",
                                  (project_id, member_id))
         return result

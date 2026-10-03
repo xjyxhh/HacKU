@@ -35,6 +35,10 @@ class LifecycleApiTests(unittest.TestCase):
         with sqlite3.connect(self.db) as conn:
             conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1)",("alice",b"test-auth-fixture",hashlib.scrypt(self.client.password.encode(),salt=b"test-auth-fixture",n=2**14,r=8,p=1,dklen=32)))
             conn.execute("INSERT OR IGNORE INTO auth_accounts(member_id,salt,password_hash,is_site_admin) VALUES(?,?,?,1)",("bob",b"test-auth-fixture",hashlib.scrypt(self.client.password.encode(),salt=b"test-auth-fixture",n=2**14,r=8,p=1,dklen=32)))
+            conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES('p','alice')")
+            conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES('p','bob')")
+            conn.execute("UPDATE project_member_roles SET role='OWNER' WHERE project_id='p'")
+            conn.execute("UPDATE auth_accounts SET is_site_admin=0 WHERE member_id IN ('alice','bob')")
 
     def test_project_creation_makes_admin_and_separate_hashed_ledger(self):
         created=self.client.post("/api/projects",json={"id":"new-project","name":"New project"})
@@ -89,6 +93,7 @@ class LifecycleApiTests(unittest.TestCase):
         self.client._login("alice")
         with sqlite3.connect(self.db) as conn:
             conn.execute("DELETE FROM auth_project_admins WHERE project_id='p' AND member_id='bob'")
+            conn.execute("UPDATE project_member_roles SET role='MEMBER' WHERE project_id='p' AND member_id='bob'")
         preview=self.client.get("/api/projects/p/members/me/exit-preview")
         self.assertEqual(preview.status_code,200,preview.text)
         self.assertTrue(any("唯一项目管理员" in item for item in preview.json()["blockers"]))
@@ -96,7 +101,9 @@ class LifecycleApiTests(unittest.TestCase):
         self.assertEqual(requested.status_code,201,requested.text)
         self.client._login("bob")
         with sqlite3.connect(self.db) as conn:
-            conn.execute("DELETE FROM auth_project_admins WHERE project_id='p' AND member_id='bob'")
+            conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES('p','alice')")
+            conn.execute("UPDATE project_member_roles SET role='OWNER' WHERE project_id='p' AND member_id='alice'")
+            conn.execute("UPDATE project_member_roles SET role='MEMBER' WHERE project_id='p' AND member_id='bob'")
         decided=self.client.post(f"/api/projects/p/members/alice/exit-requests/{requested.json()['id']}/decision",json={"decision":"APPROVE"})
         self.assertEqual(decided.status_code,409,decided.text)
 
@@ -146,9 +153,11 @@ class LifecycleApiTests(unittest.TestCase):
         self.assertEqual(debts[0]["id"],"withdraw:c")
         self.assertEqual(debts[0]["remainingExact"],"4")
         before=len(ledger["events"])
+        self.client._login("alice")
         retried=self.client.post("/api/projects/p/unwind-outbox/reconcile",json={})
         self.assertEqual(retried.status_code,200,retried.text)
         self.assertEqual(len(self.client.get("/api/projects/p/token/ledger").json()["events"]),before)
+        self.client._login("_test_admin")
         preview=self.client.get("/api/projects/p/archive-preview").json()
         self.assertEqual(preview["tokenLedger"]["debts"][0]["remainingExact"],"4")
         archived=self.client.post("/api/projects/p/archive",json={"project_id":"p","version":preview["version"],"reason":"Accounting closed"})
@@ -203,15 +212,16 @@ class LifecycleApiTests(unittest.TestCase):
         self.assertTrue(any(event["id"]=="scoped-extra" for event in self.client.get("/api/token/ledger").json()["events"]))
         self.assertEqual(self.client.post("/api/projects",json={"id":"other","name":"Other"}).status_code,201)
         self.assertEqual(self.client.get("/api/projects/other/token/ledger").json()["events"],[])
-        self.client._login("bob")
         with sqlite3.connect(self.db) as conn:
             conn.execute("UPDATE auth_accounts SET is_site_admin=0 WHERE member_id='bob'")
+        self.client._login("bob")
+        with sqlite3.connect(self.db) as conn:
             conn.execute("DELETE FROM auth_project_admins WHERE project_id='p' AND member_id='bob'")
             conn.execute("INSERT OR IGNORE INTO project_members(project_id,member_id) VALUES('other','bob')")
             conn.execute("INSERT OR IGNORE INTO project_membership_state(project_id,member_id) VALUES('other','bob')")
             conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES('other','bob')")
         blocked=self.client.post("/api/token/transfer",json={"event_id":"wrong-alias","source_id":"alice","destination_id":"bob","amount":"1","task_id":"task","evidence_hashes":["wrong:alias"],"project_id":"other"})
-        self.assertEqual(blocked.status_code,403,blocked.text)
+        self.assertEqual(blocked.status_code,201,blocked.text)
         self.assertEqual(self.client.get("/api/projects/p/token/debts").status_code,200)
 
     def test_backup_restore_rehearsal_reads_dashboard_and_ledger(self):

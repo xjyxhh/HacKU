@@ -395,6 +395,29 @@ class TokenStore:
             self._insert_events(conn, self._ledger.events[before:])
         return contract
 
+    def submit_delivery(self, contract_id: str, member_id: str, evidence: list[str]) -> CommissionContract:
+        cleaned = [value.strip() for value in evidence if isinstance(value, str) and value.strip()]
+        if not cleaned or len(cleaned) > 10 or any(len(value) > 4096 for value in cleaned):
+            raise ValueError("delivery requires 1 to 10 evidence references of at most 4096 characters")
+        with self._write() as conn:
+            contract = self._ledger.contracts.get(contract_id)
+            if contract is None:
+                raise ValueError(f"unknown contract {contract_id}")
+            if contract.contractor_id != member_id:
+                raise ValueError("only the assigned contractor can submit delivery evidence")
+            if contract.status != ContractStatus.CREDIT_RESERVED:
+                raise ValueError("delivery evidence can only be submitted after credit is reserved")
+            if conn.execute("SELECT 1 FROM contract_delivery_evidence WHERE contract_id=?", (contract_id,)).fetchone():
+                raise ValueError("delivery evidence has already been submitted")
+            before = len(self._ledger.events)
+            self._ledger.advance_contract(contract_id, ContractStatus.DELIVERED)
+            contract = self._ledger.contracts[contract_id]
+            self._update_contract(conn, contract)
+            conn.executemany("INSERT INTO contract_delivery_evidence(contract_id,member_id,evidence) VALUES(?,?,?)",
+                             [(contract_id, member_id, value) for value in cleaned])
+            self._insert_events(conn, self._ledger.events[before:])
+        return contract
+
     def mint_direct(self, event_id, task_id, recipient_id, amount, evidence_hashes) -> LedgerEvent:
         with self._write() as conn:
             before = len(self._ledger.events)
@@ -587,6 +610,11 @@ class TokenStore:
                 "SELECT contract_id,member_id FROM contract_approvals ORDER BY approved_at,member_id"
             ):
                 approvals.setdefault(contract_id, []).append(member_id)
+            delivery = {}
+            for contract_id, member_id, evidence in conn.execute(
+                "SELECT contract_id,member_id,evidence FROM contract_delivery_evidence ORDER BY created_at,evidence"
+            ):
+                delivery.setdefault(contract_id, []).append({"memberId": member_id, "reference": evidence})
         return [
             {
                 "id": contract.id,
@@ -600,6 +628,7 @@ class TokenStore:
                 "maximumMintValueExact": str(contract.maximum_mint_value),
                 "status": contract.status.value,
                 "evidenceHashes": list(contract.evidence_hashes),
+                "deliveryEvidence": delivery.get(contract.id, []),
                 "approverIds": approvals.get(contract.id, list(contract.approver_ids)),
                 "settled": contract.id in self._ledger._settled_contracts,
                 "verifiedMintValue": (float(contract.verified_mint_value)
@@ -615,14 +644,41 @@ class TokenStore:
     def graph_payload(self) -> dict:
         """JSON-ready SourceCred-style graph projection for the API layer."""
         graph = self._ledger.graph()
+        nodes = [{"address": list(node.address), "kind": node.kind, "label": node.label}
+                 for node in graph.nodes]
+        edges = [{"address": list(edge.address), "kind": edge.kind,
+                  "source": list(edge.source), "destination": list(edge.destination),
+                  "amount": float(edge.amount) if edge.amount is not None else None,
+                  "amountExact": str(edge.amount) if edge.amount is not None else None}
+                 for edge in graph.edges]
+        # Add persisted trust signals to the same graph payload. Approval edges
+        # are sourced only from contract_approvals, never from request data.
+        prefix = ("cvn", self.project.id)
+        with self._connect() as conn:
+            trust_rows = conn.execute(
+                "SELECT a.contract_id,a.member_id,'APPROVED',a.approved_at FROM contract_approvals a "
+                "JOIN commission_contracts c ON c.id=a.contract_id WHERE c.project_id=? "
+                "UNION ALL SELECT d.contract_id,d.raised_by,'DISPUTED',d.created_at FROM contract_disputes d "
+                "JOIN commission_contracts c ON c.id=d.contract_id WHERE c.project_id=?",
+                (self.project.id, self.project.id),
+            ).fetchall()
+        for contract_id, member_id, kind, _timestamp in trust_rows:
+            edges.append({"address": list(prefix + ("edge", kind.lower(), contract_id, member_id)),
+                          "kind": kind, "source": list(prefix + ("member", member_id)),
+                          "destination": list(prefix + ("contract", contract_id)),
+                          "amount": None, "amountExact": None})
+        for event in self._ledger.events:
+            if event.kind not in (LedgerEventType.FREEZE, LedgerEventType.RELEASE) or not event.contract_id:
+                continue
+            kind = "FROZEN" if event.kind == LedgerEventType.FREEZE else "RELEASED"
+            edges.append({"address": list(prefix + ("edge", kind.lower(), event.id)),
+                          "kind": kind,
+                          "source": list(prefix + ("member", event.source_id or "")),
+                          "destination": list(prefix + ("contract", event.contract_id)),
+                          "amount": float(event.amount), "amountExact": str(event.amount)})
         return {
-            "nodes": [{"address": list(node.address), "kind": node.kind, "label": node.label}
-                      for node in graph.nodes],
-            "edges": [{"address": list(edge.address), "kind": edge.kind,
-                       "source": list(edge.source), "destination": list(edge.destination),
-                       "amount": float(edge.amount) if edge.amount is not None else None,
-                       "amountExact": str(edge.amount) if edge.amount is not None else None}
-                      for edge in graph.edges],
+            "nodes": nodes,
+            "edges": edges,
         }
 
     def ledger_payload(self) -> dict:

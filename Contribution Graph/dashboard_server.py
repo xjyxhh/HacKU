@@ -8,9 +8,12 @@ import hashlib
 import json
 import os
 import secrets
+import smtplib
 import sqlite3
+import threading
 import time
-from urllib.parse import urlsplit
+from email.message import EmailMessage
+from urllib.parse import quote, urlsplit
 from contextvars import ContextVar
 from uuid import uuid4
 from dataclasses import asdict, replace
@@ -71,6 +74,29 @@ def valid_password(password: str) -> bool:
     return (len(password) >= 8 and any(char.islower() for char in password)
             and any(char.isupper() for char in password)
             and any(char.isdigit() for char in password))
+
+
+def send_verification_email(recipient: str, link: str) -> bool:
+    host = os.environ.get("HACKU_SMTP_HOST", "").strip()
+    sender = os.environ.get("HACKU_SMTP_FROM", "").strip()
+    if not host or not sender:
+        return False
+    message = EmailMessage()
+    message["Subject"] = "Verify your HacKU account email"
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(f"Open this link within one hour to verify your email address:\n\n{link}\n")
+    port = int(os.environ.get("HACKU_SMTP_PORT", "587"))
+    username = os.environ.get("HACKU_SMTP_USER", "")
+    password = os.environ.get("HACKU_SMTP_PASSWORD", "")
+    client_class = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
+    with client_class(host, port, timeout=10) as client:
+        if port != 465:
+            client.starttls()
+        if username:
+            client.login(username, password)
+        client.send_message(message)
+    return True
 
 
 def request_origin_matches(request: Request, origin: str | None) -> bool:
@@ -223,6 +249,10 @@ class ContractApprovalInput(BaseModel):
     note: str = ""
 
 
+class ContractDeliveryInput(BaseModel):
+    evidence: list[str]
+
+
 class ContractDisputeInput(BaseModel):
     reason: str
 
@@ -275,6 +305,9 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
     app.state.db_path = str(db_path)
     token_db_path = Path(token_db_path) if token_db_path else DEFAULT_TOKEN_DB
     token_project_context = ContextVar("token_project_id", default=None)
+    request_ledger_project = ContextVar("request_ledger_project_id", default=None)
+    project_locks = {}
+    project_locks_guard = threading.Lock()
     # Identity tables are additive; business tables and data remain untouched.
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if os.environ.get("POCKETBAY_DATA_DIR") and db_path == DEFAULT_DB and not db_path.exists():
@@ -283,6 +316,22 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
     with sqlite3.connect(db_path) as auth_conn:
         auth_conn.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
         auth_conn.executescript(Path(__file__).with_name("auth_schema.sql").read_text(encoding="utf-8"))
+        account_columns = {row[1] for row in auth_conn.execute("PRAGMA table_info(auth_accounts)")}
+        for column, declaration in (("email", "TEXT"), ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
+                                    ("display_name", "TEXT"), ("bio", "TEXT NOT NULL DEFAULT ''"),
+                                    ("avatar_url", "TEXT NOT NULL DEFAULT ''"),
+                                    ("profile_updated_at", "TEXT NOT NULL DEFAULT ''")):
+            if column not in account_columns:
+                auth_conn.execute(f"ALTER TABLE auth_accounts ADD COLUMN {column} {declaration}")
+        auth_conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS auth_accounts_verified_email "
+                          "ON auth_accounts(email) WHERE email_verified=1 AND email IS NOT NULL")
+        # Preserve the legacy administrator model while assigning explicit project roles.
+        auth_conn.execute("INSERT OR IGNORE INTO project_member_roles(project_id,member_id,role) "
+                          "SELECT project_id,member_id,'OWNER' FROM auth_project_admins")
+        auth_conn.execute("INSERT OR IGNORE INTO project_member_roles(project_id,member_id,role) "
+                          "SELECT pm.project_id,pm.member_id,'MEMBER' FROM project_members pm "
+                          "WHERE NOT EXISTS (SELECT 1 FROM project_member_roles r "
+                          "WHERE r.project_id=pm.project_id AND r.member_id=pm.member_id)")
         # Additive, repeatable lifecycle schema. Historical project/member rows remain intact.
         auth_conn.executescript(Path(__file__).with_name("lifecycle_schema.sql").read_text(encoding="utf-8"))
         columns={row[1] for row in auth_conn.execute("PRAGMA table_info(project_lifecycle)")}
@@ -339,11 +388,13 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                      and request.url.path.startswith("/api/")
                      and not request.url.path.endswith("/preview"))
         path_parts=request.url.path.strip("/").split("/")
+        if request.method == "POST" and request.url.path == "/api/":
+            return JSONResponse(status_code=404, content={"detail":"not found"})
         scoped_token = False
         project_id = None
         if protected:
-            if request.url.path not in ("/api/auth/login", "/api/auth/accept-invite"):
-                session = auth_session(request)
+            session = auth_session(request)
+            if request.url.path not in ("/api/auth/login", "/api/auth/accept-invite", "/api/auth/register", "/api/auth/verify-email"):
                 if not session:
                     return JSONResponse(status_code=401, content={"detail": "login required"})
                 origin = request.headers.get("origin")
@@ -352,12 +403,48 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                 csrf = request.headers.get("x-csrf-token", "")
                 if not csrf or not hmac.compare_digest(hashlib.sha256(csrf.encode()).digest(), session["csrf_hash"]):
                     return JSONResponse(status_code=403, content={"detail": "invalid CSRF token"})
+            if session is None:
+                session = {"member_id": None, "site_admin": False}
                 if len(path_parts) < 2 or path_parts[0] != "api":
                     return JSONResponse(status_code=404, content={"detail": "not found"})
                 body_data = {}
                 try: body_data = json.loads(await request.body())
                 except (ValueError, TypeError): pass
                 project_id = body_data.get("project_id")
+                requested_project = project_id
+                if len(path_parts) > 2 and path_parts[1] == "token" and path_parts[2] == "contracts":
+                    contract_id = path_parts[3] if len(path_parts) > 3 else ""
+                    contract_project = None
+                    for candidate in (token_db_path, *sorted((db_path.parent / "token-ledgers").glob("*.sqlite3"))):
+                        try:
+                            with sqlite3.connect(candidate) as conn:
+                                party = conn.execute("SELECT project_id FROM commission_contracts WHERE id=?", (contract_id,)).fetchone()
+                            if party:
+                                contract_project = party[0]
+                                break
+                        except sqlite3.Error:
+                            continue
+                    project_id = contract_project
+                    if project_id is None:
+                        with sqlite3.connect(db_path) as conn:
+                            migrated_project = conn.execute("SELECT project_id FROM token_ledger_migrations ORDER BY migrated_at LIMIT 1").fetchone()
+                        project_id = migrated_project[0] if migrated_project else None
+                elif len(path_parts) > 2 and path_parts[1] == "token" and path_parts[2] not in ("project", "migrate"):
+                    with sqlite3.connect(db_path) as conn:
+                        migrated_project = conn.execute("SELECT project_id FROM token_ledger_migrations ORDER BY migrated_at LIMIT 1").fetchone()
+                    project_id = migrated_project[0] if migrated_project else None
+                    if project_id is None:
+                        try:
+                            with sqlite3.connect(token_db_path) as conn:
+                                row = conn.execute("SELECT id FROM token_projects LIMIT 1").fetchone()
+                            project_id = row[0] if row else None
+                        except sqlite3.Error:
+                            pass
+                if path_parts[1] == "token":
+                    with sqlite3.connect(db_path) as conn:
+                        migrated = conn.execute("SELECT project_id FROM token_ledger_migrations ORDER BY migrated_at LIMIT 1").fetchone()
+                    if migrated and requested_project and requested_project != migrated[0] and not (len(path_parts) > 2 and path_parts[2] == "contracts"):
+                        return JSONResponse(status_code=403, content={"detail":"legacy token route is bound to its original project"})
                 if len(path_parts) > 2 and path_parts[1] == "projects": project_id = path_parts[2]
                 scoped_token = len(path_parts) > 3 and path_parts[1] == "projects" and path_parts[3] == "token"
                 if scoped_token: project_id=path_parts[2]
@@ -366,6 +453,23 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                         row=conn.execute("SELECT project_id FROM contributions WHERE id=?",(path_parts[2],)).fetchone()
                     project_id=row[0] if row else None
                 is_contribution_write = path_parts[1] == "contributions" or (path_parts[1] == "projects" and "contributions" in path_parts)
+                if project_id:
+                    with sqlite3.connect(db_path) as conn:
+                        early_lifecycle = conn.execute("SELECT state FROM project_lifecycle WHERE project_id=?", (project_id,)).fetchone()
+                    if early_lifecycle and early_lifecycle[0] != "ACTIVE" and not request.url.path.endswith(("/restore", "/archive")):
+                        return JSONResponse(status_code=410, content={"detail":"project is archived"})
+                    with sqlite3.connect(db_path) as conn:
+                        role_row = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (project_id, session["member_id"])).fetchone()
+                    role = role_row[0] if role_row else None
+                    is_review = path_parts[1] == "contributions" and len(path_parts) > 3 and path_parts[3] in ("reviews", "resolve")
+                    if is_contribution_write and not session["site_admin"]:
+                        allowed_roles = {"OWNER", "VERIFIER"} if is_review else {"OWNER", "MEMBER", "VERIFIER"}
+                        if role not in allowed_roles:
+                            return JSONResponse(status_code=403, content={"detail": "project role does not allow this contribution action"})
+                    if (path_parts[1] == "projects" and len(path_parts) > 3 and path_parts[3] == "token"
+                            and len(path_parts) > 4 and path_parts[4] in ("mint", "migrate", "reconcile", "debts")):
+                        if role not in {"OWNER", "VERIFIER"} and not session["site_admin"]:
+                            return JSONResponse(status_code=403, content={"detail": "project role does not allow this token action"})
                 # Archived projects and exited members cannot mutate project data,
                 # even through legacy token aliases.
                 if project_id and path_parts[1] != "auth":
@@ -383,6 +487,8 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                         return JSONResponse(status_code=403, content={"detail":"site administrator required"})
                     with sqlite3.connect(db_path) as conn:
                         original=conn.execute("SELECT project_id FROM token_ledger_migrations ORDER BY migrated_at LIMIT 1").fetchone()
+                    if original and requested_project and requested_project != original[0] and not (len(path_parts) > 2 and path_parts[2] == "contracts"):
+                        return JSONResponse(status_code=403, content={"detail":"legacy token route is bound to its original project"})
                     # Legacy token aliases operate on the active ledger. Never
                     # authorize them using a project_id supplied in the body.
                     project_id = original[0] if original else None
@@ -396,6 +502,8 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                             pass
                     if not project_id and len(path_parts) > 2 and path_parts[2] == "migrate":
                         project_id = request.query_params.get("project_id")
+                    if requested_project and project_id and requested_project != project_id and len(path_parts) <= 2:
+                        return JSONResponse(status_code=403, content={"detail":"legacy token route is bound to its original project"})
                 if project_id:
                     with sqlite3.connect(db_path) as conn:
                         lifecycle=conn.execute("SELECT state FROM project_lifecycle WHERE project_id=?",(project_id,)).fetchone()
@@ -405,19 +513,55 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                     if (not session["site_admin"] or is_contribution_write) and membership and membership[0]!="ACTIVE" and not request.url.path.endswith("/cancel") and not request.url.path.endswith("/decision"):
                         return JSONResponse(status_code=403,content={"detail":"project membership is not active"})
                 if request.url.path == "/api/projects" and not session["site_admin"]:
-                    return JSONResponse(status_code=403, content={"detail":"site administrator required"})
+                    # Authenticated members may create a new project; the handler
+                    # atomically adds them as its Owner and never upgrades an existing project.
+                    pass
                 if project_id and not is_contribution_write:
                     with sqlite3.connect(db_path) as conn:
-                        allowed = session["site_admin"] or conn.execute("SELECT 1 FROM auth_project_admins WHERE project_id=? AND member_id=?", (project_id,session["member_id"])).fetchone()
+                        role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (project_id,session["member_id"])).fetchone()
+                        allowed = session["site_admin"] or (role and role[0] == "OWNER")
                         if not allowed and (request.url.path.endswith("/decision") or "/members/me/exit-requests" in request.url.path):
                             allowed = conn.execute("SELECT 1 FROM project_membership_state WHERE project_id=? AND member_id=? AND state IN ('ACTIVE','EXIT_REQUESTED')", (project_id,session["member_id"])).fetchone()
                     if not allowed and request.url.path.endswith("/approve"):
                         try:
                             with sqlite3.connect(project_token_path(project_id) if scoped_token else token_db_path) as conn:
                                 members = conn.execute("SELECT member_ids FROM token_projects WHERE id=?", (project_id,)).fetchone()
-                            allowed = members and session["member_id"] in json.loads(members[0])
+                            with sqlite3.connect(db_path) as conn:
+                                role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (project_id,session["member_id"])).fetchone()
+                            allowed = bool(members and session["member_id"] in json.loads(members[0]) and role and role[0] in {"OWNER","VERIFIER"})
                         except (sqlite3.Error, ValueError, TypeError):
                             allowed = False
+                    if not allowed and request.url.path.endswith("/deliver"):
+                        try:
+                            contract_id = path_parts[-2]
+                            selected = project_token_path(project_id) if scoped_token else token_db_path
+                            with sqlite3.connect(selected) as conn:
+                                row = conn.execute("SELECT contractor_id FROM commission_contracts WHERE id=?", (contract_id,)).fetchone()
+                            allowed = bool(row and row[0] == session["member_id"])
+                        except (sqlite3.Error, IndexError):
+                            allowed = False
+                    if not allowed and request.url.path.endswith(("/advance", "/settle")):
+                        try:
+                            contract_id = path_parts[-2]
+                            selected = project_token_path(project_id) if scoped_token else active_token_path()
+                            with sqlite3.connect(selected) as conn:
+                                party = conn.execute("SELECT principal_id,contractor_id FROM commission_contracts WHERE id=?", (contract_id,)).fetchone()
+                            with sqlite3.connect(db_path) as conn:
+                                role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (project_id,session["member_id"])).fetchone()
+                            if request.url.path.endswith("/settle"):
+                                allowed = bool(role and role[0] in {"OWNER","VERIFIER"})
+                            else:
+                                allowed = bool((party and session["member_id"] in party) or (role and role[0] in {"OWNER","VERIFIER"}))
+                        except (sqlite3.Error, IndexError):
+                            allowed = False
+                    if not allowed and request.url.path.endswith("/contracts"):
+                        with sqlite3.connect(db_path) as conn:
+                            role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (project_id,session["member_id"])).fetchone()
+                        allowed = bool(body_data.get("principal_id") == session["member_id"] and role and role[0] in {"OWNER","MEMBER","VERIFIER"})
+                    if not allowed and request.url.path.endswith("/transfer"):
+                        with sqlite3.connect(db_path) as conn:
+                            role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (project_id,session["member_id"])).fetchone()
+                        allowed = bool(body_data.get("source_id") == session["member_id"] and role and role[0] in {"OWNER","MEMBER","VERIFIER"})
                     if not allowed and request.url.path.endswith("/dispute"):
                         try:
                             with sqlite3.connect(project_token_path(project_id) if scoped_token else token_db_path) as conn:
@@ -428,10 +572,15 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                     if not allowed:
                         return JSONResponse(status_code=403, content={"detail":"project administrator required"})
         scoped = token_project_context.set(project_id if scoped_token else None) if protected else None
+        scoped_ledger = request_ledger_project.set(project_id if project_id else None) if protected else None
         write_lock = bool(protected and project_id)
         lock_file = None
+        process_lock = None
         try:
             if write_lock:
+                with project_locks_guard:
+                    process_lock = project_locks.setdefault(project_id, threading.Lock())
+                await asyncio.to_thread(process_lock.acquire)
                 lock_dir=db_path.parent / "project-locks"
                 lock_dir.mkdir(parents=True,exist_ok=True)
                 lock_file=(lock_dir / (hashlib.sha256(project_id.encode("utf-8")).hexdigest()+".lock")).open("a+b")
@@ -460,7 +609,10 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
             if lock_file:
                 fcntl.flock(lock_file.fileno(),fcntl.LOCK_UN)
                 lock_file.close()
+            if process_lock and process_lock.locked():
+                process_lock.release()
             if scoped is not None: token_project_context.reset(scoped)
+            if scoped_ledger is not None: request_ledger_project.reset(scoped_ledger)
 
     @app.get("/api/auth/me")
     def auth_me(request: Request, response: Response):
@@ -469,8 +621,9 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         if not session:
             return {"authenticated": False}
         with sqlite3.connect(db_path) as conn:
-            projects = conn.execute("SELECT pm.project_id, p.name, EXISTS(SELECT 1 FROM auth_project_admins pa WHERE pa.project_id=pm.project_id AND pa.member_id=pm.member_id) FROM project_members pm JOIN projects p ON p.id=pm.project_id LEFT JOIN project_lifecycle l ON l.project_id=p.id LEFT JOIN project_membership_state ms ON ms.project_id=pm.project_id AND ms.member_id=pm.member_id WHERE pm.member_id=? AND COALESCE(l.state,'ACTIVE')='ACTIVE' AND COALESCE(ms.state,'ACTIVE')='ACTIVE'", (session["member_id"],)).fetchall()
-        return {"authenticated": True, "memberId": session["member_id"], "siteAdmin": session["site_admin"], "projects": [{"id":p[0],"name":p[1],"admin":bool(p[2])} for p in projects], "csrf": request.cookies.get("hacku_csrf", "")}
+            projects = conn.execute("SELECT pm.project_id,p.name,EXISTS(SELECT 1 FROM auth_project_admins pa WHERE pa.project_id=pm.project_id AND pa.member_id=pm.member_id),COALESCE(r.role,'MEMBER') FROM project_members pm JOIN projects p ON p.id=pm.project_id LEFT JOIN project_lifecycle l ON l.project_id=p.id LEFT JOIN project_membership_state ms ON ms.project_id=pm.project_id AND ms.member_id=pm.member_id LEFT JOIN project_member_roles r ON r.project_id=pm.project_id AND r.member_id=pm.member_id WHERE pm.member_id=? AND COALESCE(l.state,'ACTIVE')='ACTIVE' AND COALESCE(ms.state,'ACTIVE')='ACTIVE'", (session["member_id"],)).fetchall()
+            name = conn.execute("SELECT COALESCE(NULLIF(a.display_name,''), m.name) FROM auth_accounts a JOIN members m ON m.id=a.member_id WHERE a.member_id=?", (session["member_id"],)).fetchone()[0]
+        return {"authenticated": True, "memberId": session["member_id"], "displayName": name, "siteAdmin": session["site_admin"], "projects": [{"id":p[0],"name":p[1],"admin":bool(p[2]),"role":p[3]} for p in projects], "csrf": request.cookies.get("hacku_csrf", "")}
 
     @app.post("/api/auth/login")
     async def auth_login(request: Request, response: Response):
@@ -478,11 +631,11 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         if not request_origin_matches(request, origin):
             return JSONResponse(status_code=403, content={"detail":"same-origin request required"})
         body = await request.json()
-        member_id, password = str(body.get("member_id", "")), str(body.get("password", ""))
-        if len(member_id) > 256 or len(password) > 1024:
+        identifier, password = str(body.get("member_id", body.get("email", ""))), str(body.get("password", ""))
+        if len(identifier) > 320 or len(password) > 1024:
             return JSONResponse(status_code=401, content={"detail":"invalid member ID or password"})
         address = request.client.host if request.client else "unknown"
-        attempt_key = hashlib.sha256(f"{member_id}\0{address}".encode()).hexdigest()
+        attempt_key = hashlib.sha256(f"{identifier.casefold()}\0{address}".encode()).hexdigest()
         now = int(time.time())
         with sqlite3.connect(db_path) as conn:
             conn.execute("DELETE FROM auth_login_attempts WHERE window_start<?", (now-900,))
@@ -490,15 +643,19 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
             if attempt and attempt[0] >= 5 and now-attempt[1] < 900:
                 return JSONResponse(status_code=429, content={"detail":"invalid member ID or password"})
         with sqlite3.connect(db_path) as conn:
-            row = conn.execute("SELECT salt,password_hash FROM auth_accounts WHERE member_id=?", (member_id,)).fetchone()
+            row = conn.execute("SELECT member_id,salt,password_hash FROM auth_accounts WHERE member_id=? COLLATE NOCASE "
+                               "OR (lower(email)=? AND (SELECT COUNT(*) FROM auth_accounts WHERE lower(email)=?)=1) "
+                               "ORDER BY CASE WHEN member_id=? THEN 0 ELSE 1 END LIMIT 1",
+                               (identifier, identifier.strip().casefold(), identifier.strip().casefold(), identifier)).fetchone()
         valid = False
         if row:
-            try: valid = hmac.compare_digest(hashlib.scrypt(password.encode(), salt=row[0], n=2**14, r=8, p=1, dklen=32), row[1])
+            try: valid = hmac.compare_digest(hashlib.scrypt(password.encode(), salt=row[1], n=2**14, r=8, p=1, dklen=32), row[2])
             except ValueError: pass
         if not valid:
             with sqlite3.connect(db_path) as conn:
                 conn.execute("INSERT INTO auth_login_attempts VALUES(?,?,?) ON CONFLICT(attempt_key) DO UPDATE SET failures=auth_login_attempts.failures+1",(attempt_key,1,now))
             return JSONResponse(status_code=401, content={"detail":"invalid member ID or password"})
+        member_id = row[0]
         with sqlite3.connect(db_path) as conn: conn.execute("DELETE FROM auth_login_attempts WHERE attempt_key=?",(attempt_key,))
         raw, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with sqlite3.connect(db_path) as conn:
@@ -507,6 +664,183 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         response.set_cookie("hacku_session", raw, httponly=True, secure=secure, samesite="lax", max_age=43200, path="/")
         response.set_cookie("hacku_csrf", csrf, httponly=False, secure=secure, samesite="lax", max_age=43200, path="/")
         return {"authenticated": True, "memberId": member_id}
+
+    @app.post("/api/auth/register", status_code=201)
+    async def auth_register(request: Request, response: Response):
+        if not request_origin_matches(request, request.headers.get("origin")):
+            return JSONResponse(status_code=403, content={"detail":"same-origin request required"})
+        body = await request.json()
+        email = str(body.get("email", "")).strip().casefold()
+        display_name = str(body.get("display_name", body.get("displayName", ""))).strip()
+        password = str(body.get("password", ""))
+        if len(email) > 320 or email.count("@") != 1 or "." not in email.rsplit("@",1)[-1] or any(c.isspace() for c in email):
+            return JSONResponse(status_code=400, content={"detail":"enter a valid email address"})
+        if not display_name or len(display_name) > 120 or not valid_password(password):
+            return JSONResponse(status_code=400, content={"detail":"display name is required; password must be at least 8 characters and include uppercase, lowercase, and a number"})
+        now = int(time.time()); address = request.client.host if request.client else "unknown"
+        key = "register:" + hashlib.sha256(address.encode()).hexdigest()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("DELETE FROM auth_login_attempts WHERE window_start<?", (now-900,))
+            attempt = conn.execute("SELECT failures,window_start FROM auth_login_attempts WHERE attempt_key=?", (key,)).fetchone()
+            if attempt and attempt[0] >= 5 and now-attempt[1] < 900:
+                return JSONResponse(status_code=429, content={"detail":"registration rate limit reached; try again later"})
+            conn.commit()
+            salt = secrets.token_bytes(16)
+            digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+            member_id = "m_" + secrets.token_urlsafe(12).replace("-", "").replace("_", "")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM auth_accounts WHERE lower(email)=?", (email,)).fetchone():
+                    conn.rollback()
+                    return JSONResponse(status_code=409, content={"detail":"account could not be created; check your details or sign in"})
+                conn.execute("INSERT INTO members(id,name) VALUES(?,?)", (member_id, display_name))
+                conn.execute("INSERT INTO auth_accounts(member_id,salt,password_hash,email,display_name,email_verified) VALUES(?,?,?,?,?,0)",
+                             (member_id, salt, digest, email, display_name))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return JSONResponse(status_code=409, content={"detail":"account could not be created; check your details or sign in"})
+            conn.execute("INSERT INTO auth_login_attempts VALUES(?,?,?) ON CONFLICT(attempt_key) DO UPDATE SET failures=auth_login_attempts.failures+1", (key,1,now))
+        verification_token = secrets.token_urlsafe(32)
+        verification_hash = hashlib.sha256(verification_token.encode()).digest()
+        mail_configured = bool(os.environ.get("HACKU_SMTP_HOST") and os.environ.get("HACKU_SMTP_FROM"))
+        if mail_configured:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE auth_email_tokens SET used_at=? WHERE member_id=? AND used_at IS NULL", (now,member_id))
+                conn.execute("INSERT INTO auth_email_tokens(token_hash,member_id,email,expires_at) VALUES(?,?,?,?)", (verification_hash,member_id,email,now+3600))
+            try:
+                send_verification_email(email, str(request.base_url).rstrip("/") + "/email-verify.html#" + verification_token)
+                verification_sent = True
+            except (OSError, smtplib.SMTPException, ValueError):
+                with sqlite3.connect(db_path) as conn: conn.execute("DELETE FROM auth_email_tokens WHERE token_hash=?", (verification_hash,))
+                verification_sent = False
+        else:
+            verification_sent = False
+        raw, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("INSERT INTO auth_sessions VALUES(?,?,?,?)", (hashlib.sha256(raw.encode()).digest(), member_id, hashlib.sha256(csrf.encode()).digest(), now+43200))
+        secure = cookie_is_secure(request)
+        response.set_cookie("hacku_session", raw, httponly=True, secure=secure, samesite="lax", max_age=43200, path="/")
+        response.set_cookie("hacku_csrf", csrf, httponly=False, secure=secure, samesite="lax", max_age=43200, path="/")
+        return {"authenticated":True,"memberId":member_id,"emailVerified":False,"verificationSent":verification_sent}
+
+    @app.post("/api/auth/verify-email")
+    async def verify_email(request: Request, body: dict):
+        if not request_origin_matches(request, request.headers.get("origin")):
+            return JSONResponse(status_code=403, content={"detail":"same-origin request required"})
+        token = str(body.get("token", "")); now = int(time.time())
+        if not token or len(token) > 256: return JSONResponse(status_code=400, content={"detail":"verification link is invalid or expired"})
+        digest = hashlib.sha256(token.encode()).digest()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT member_id,email FROM auth_email_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?", (digest,now)).fetchone()
+            if not row: return JSONResponse(status_code=400, content={"detail":"verification link is invalid or expired"})
+            if conn.execute("SELECT 1 FROM auth_accounts WHERE lower(email)=? AND member_id<>? AND email_verified=1", (row[1],row[0])).fetchone():
+                return JSONResponse(status_code=409, content={"detail":"email is already verified on another account"})
+            conn.execute("UPDATE auth_accounts SET email=?,email_verified=1,profile_updated_at=CURRENT_TIMESTAMP WHERE member_id=?", (row[1],row[0]))
+            conn.execute("UPDATE auth_email_tokens SET used_at=? WHERE token_hash=?", (now,digest)); conn.commit()
+        return {"verified":True}
+
+    @app.post("/api/profile/email")
+    def request_email_change(request: Request, body: dict):
+        session = auth_session(request)
+        if not session: return JSONResponse(status_code=401, content={"detail":"login required"})
+        email = str(body.get("email", "")).strip().casefold()
+        if len(email)>320 or email.count("@")!=1 or "." not in email.rsplit("@",1)[-1] or any(c.isspace() for c in email):
+            return JSONResponse(status_code=400, content={"detail":"enter a valid email address"})
+        if not os.environ.get("HACKU_SMTP_HOST") or not os.environ.get("HACKU_SMTP_FROM"):
+            return JSONResponse(status_code=503, content={"detail":"email verification is unavailable; contact an administrator to change your email"})
+        raw=secrets.token_urlsafe(32); digest=hashlib.sha256(raw.encode()).digest(); now=int(time.time()); member_id=session["member_id"]
+        with sqlite3.connect(db_path) as conn:
+            if conn.execute("SELECT 1 FROM auth_accounts WHERE lower(email)=? AND member_id<>?",(email,member_id)).fetchone():
+                return JSONResponse(status_code=409,content={"detail":"email is already in use"})
+            conn.execute("UPDATE auth_email_tokens SET used_at=? WHERE member_id=? AND used_at IS NULL",(now,member_id))
+            conn.execute("INSERT INTO auth_email_tokens(token_hash,member_id,email,expires_at) VALUES(?,?,?,?)",(digest,member_id,email,now+3600))
+        try: send_verification_email(email,str(request.base_url).rstrip("/")+"/email-verify.html#"+raw)
+        except (OSError,smtplib.SMTPException,ValueError):
+            with sqlite3.connect(db_path) as conn: conn.execute("DELETE FROM auth_email_tokens WHERE token_hash=?",(digest,))
+            return JSONResponse(status_code=503,content={"detail":"verification email could not be sent; try again or contact an administrator"})
+        return {"verificationSent":True}
+
+    @app.get("/api/profile")
+    def get_profile(request: Request):
+        session = auth_session(request)
+        if not session: return JSONResponse(status_code=401, content={"detail":"login required"})
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("SELECT m.name,a.email,a.email_verified,a.bio,a.avatar_url,a.profile_updated_at FROM members m JOIN auth_accounts a ON a.member_id=m.id WHERE m.id=?", (session["member_id"],)).fetchone()
+        return {"memberId":session["member_id"],"displayName":row[0],"email":row[1],"emailVerified":bool(row[2]),"bio":row[3],"avatarUrl":row[4],"updatedAt":row[5]}
+
+    @app.patch("/api/profile")
+    def patch_profile(request: Request, body: dict):
+        session = auth_session(request)
+        if not session: return JSONResponse(status_code=401, content={"detail":"login required"})
+        allowed = {"display_name", "bio", "avatar_url"}
+        if set(body) - allowed: return JSONResponse(status_code=400, content={"detail":"email changes require verified email support; contact an administrator"})
+        name = str(body.get("display_name", "")).strip(); bio = str(body.get("bio", "")); avatar = str(body.get("avatar_url", "")).strip()
+        if not name or len(name)>120 or len(bio)>500: return JSONResponse(status_code=400, content={"detail":"display name or introduction is invalid"})
+        if avatar and (len(avatar)>2048 or not avatar.startswith("https://") or any(c in avatar for c in "<>\"'")):
+            return JSONResponse(status_code=400, content={"detail":"avatar must be an HTTPS image URL"})
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE members SET name=? WHERE id=?", (name,session["member_id"]))
+            conn.execute("UPDATE auth_accounts SET display_name=?,bio=?,avatar_url=?,profile_updated_at=CURRENT_TIMESTAMP WHERE member_id=?", (name,bio,avatar,session["member_id"]))
+        return get_profile(request)
+
+    @app.get("/api/workspace")
+    def get_workspace(request: Request):
+        session = auth_session(request)
+        if not session: return JSONResponse(status_code=401, content={"detail":"login required"})
+        member_id = session["member_id"]
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute("SELECT p.id,p.name,COALESCE(r.role,'MEMBER'),COALESCE(l.state,'ACTIVE'),COALESCE(l.token_setup_state,'TOKEN_SETUP_PENDING'),(SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id=p.id),(SELECT COUNT(*) FROM tasks t WHERE t.project_id=p.id) FROM project_members pm JOIN projects p ON p.id=pm.project_id LEFT JOIN project_member_roles r ON r.project_id=pm.project_id AND r.member_id=pm.member_id LEFT JOIN project_lifecycle l ON l.project_id=p.id WHERE pm.member_id=? AND COALESCE((SELECT state FROM project_membership_state ms WHERE ms.project_id=p.id AND ms.member_id=pm.member_id),'ACTIVE')<>'WITHDRAWN' ORDER BY p.name", (member_id,)).fetchall()
+        projects=[]
+        for row in rows:
+            project_id, name, role, state, ledger_state, member_count, task_count = row
+            project = {"id":project_id,"name":name,"role":role,"state":state,
+                       "tokenLedgerState":ledger_state,"memberCount":member_count,
+                       "taskCount":task_count,"balanceExact":None,"frozenExact":None,
+                       "balanceState":"UNAVAILABLE","todos":[]}
+            if state == "ACTIVE" and ledger_state == "READY":
+                try:
+                    ledger = token_read(project_id)
+                    project["balanceExact"] = str(ledger.balance(member_id))
+                    frozen = sum((ledger.ledger.events[sequence-1].amount
+                                  for sequence, holders in ledger.ledger._frozen_events.items()
+                                  if sequence <= len(ledger.ledger.events)
+                                  and ledger.ledger.events[sequence-1].destination_id == member_id), Decimal("0"))
+                    project["frozenExact"] = str(frozen)
+                    project["balanceState"] = "READY"
+                    for contract in ledger.ledger.contracts.values():
+                        if contract.status == ContractStatus.OFFERED and contract.contractor_id == member_id:
+                            project["todos"].append({"kind":"ACCEPT","objectId":contract.id,"href":f"/token.html?project={quote(project_id)}#contract-{quote(contract.id)}"})
+                        if contract.status == ContractStatus.CREDIT_RESERVED and contract.contractor_id == member_id:
+                            project["todos"].append({"kind":"DELIVER","objectId":contract.id,"href":f"/token.html?project={quote(project_id)}#contract-{quote(contract.id)}"})
+                        if (contract.status == ContractStatus.VERIFIED and member_id not in {contract.principal_id,contract.contractor_id}
+                                and role in {"OWNER","VERIFIER"} and member_id not in contract.approver_ids):
+                            project["todos"].append({"kind":"APPROVE","objectId":contract.id,"href":f"/token.html?project={quote(project_id)}#contract-{quote(contract.id)}"})
+                except (ValueError, sqlite3.Error, OSError):
+                    project["balanceState"] = "UNAVAILABLE"
+            if state == "ACTIVE":
+                with sqlite3.connect(db_path) as conn:
+                    pending = conn.execute("SELECT id FROM contributions WHERE project_id=? AND status='PENDING' AND contributor_id<>? ORDER BY id", (project_id,member_id)).fetchall()
+                    exit_requests = conn.execute("SELECT member_id,id FROM membership_exit_requests WHERE project_id=? AND state='PENDING' ORDER BY created_at,id",(project_id,)).fetchall() if role == "OWNER" else []
+                if role in {"OWNER","VERIFIER"}:
+                    project["todos"].extend({"kind":"REVIEW","objectId":item[0],"href":f"/review.html?project={quote(project_id)}&contribution={quote(item[0])}"} for item in pending)
+                if role == "OWNER":
+                    project["todos"].extend({"kind":"EXIT","objectId":item[0],"href":f"/?project={quote(project_id)}#lifecycle"} for item in exit_requests)
+            projects.append(project)
+        return {"memberId":member_id,"projects":projects}
+
+    @app.get("/api/demo")
+    def public_demo():
+        # Fixed sample data; this endpoint never opens a database or token ledger.
+        return {"demo": True, "label": "演示数据，不代表真实成员余额", "project": {"id": "demo-hackuku", "name": "HacKU 示例项目"},
+                "steps": [{"title": "提交贡献", "detail": "成员 Lin 提交实现记录和代码链接。", "kind": "CONTRIBUTES_TO"},
+                          {"title": "独立审核", "detail": "成员 Rui 核对证据；贡献者不能审核本人记录。", "kind": "APPROVED"},
+                          {"title": "Token 记账", "detail": "通过审核的贡献形成独立账本事件。", "kind": "MINTED"},
+                          {"title": "委托交付", "detail": "委托人发布任务，承接人提交交付证据。", "kind": "COMMISSIONED"},
+                          {"title": "争议处理", "detail": "先冻结关联付款，再由非当事人核验并释放、退款或拆分。", "kind": "DISPUTED"}],
+                "links": {"register": "/register.html", "dashboard": "/", "fairness": "/fairness.html"}}
 
     @app.post("/api/auth/logout")
     def auth_logout(request: Request, response: Response):
@@ -550,6 +884,61 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
             conn.execute("INSERT INTO auth_invites VALUES(?,?,?,?,NULL)", (digest,project_id,member_id,now+172800))
         return {"memberId":member_id,"expiresAt":now+172800,"inviteUrl":str(request.base_url).rstrip("/")+"/accept-invite.html#"+raw}
 
+    @app.get("/api/projects/{project_id}/members")
+    def list_project_members(project_id: str, request: Request):
+        session = auth_session(request)
+        if not session: return JSONResponse(status_code=401, content={"detail":"login required"})
+        with sqlite3.connect(db_path) as conn:
+            owner = conn.execute("SELECT 1 FROM project_member_roles WHERE project_id=? AND member_id=? AND role='OWNER'", (project_id,session["member_id"])).fetchone()
+            if not owner and not session["site_admin"]: return JSONResponse(status_code=403, content={"detail":"project owner required"})
+            rows = conn.execute("SELECT pm.member_id,m.name,COALESCE(r.role,'MEMBER'),COALESCE(ms.state,'ACTIVE') FROM project_members pm JOIN members m ON m.id=pm.member_id LEFT JOIN project_member_roles r ON r.project_id=pm.project_id AND r.member_id=pm.member_id LEFT JOIN project_membership_state ms ON ms.project_id=pm.project_id AND ms.member_id=pm.member_id WHERE pm.project_id=? ORDER BY m.name", (project_id,)).fetchall()
+        return {"projectId":project_id,"members":[{"memberId":r[0],"name":r[1],"role":r[2],"state":r[3]} for r in rows]}
+
+    @app.post("/api/projects/{project_id}/members/invite-existing", status_code=201)
+    def invite_existing_member(project_id: str, request: Request, body: dict):
+        session = auth_session(request); member_id = str(body.get("member_id", "")).strip(); role = str(body.get("role", "MEMBER")).upper()
+        if role not in {"OWNER","MEMBER","VERIFIER","VIEWER"}: return JSONResponse(status_code=400, content={"detail":"invalid project role"})
+        with sqlite3.connect(db_path) as conn:
+            owner = conn.execute("SELECT 1 FROM project_member_roles WHERE project_id=? AND member_id=? AND role='OWNER'", (project_id,session["member_id"])).fetchone()
+            if not owner and not session["site_admin"]: return JSONResponse(status_code=403, content={"detail":"project owner required"})
+            account = conn.execute("SELECT m.id FROM members m JOIN auth_accounts a ON a.member_id=m.id WHERE m.id=? COLLATE NOCASE OR (a.email_verified=1 AND a.email=?)", (member_id,member_id.casefold())).fetchone()
+            if not account: return JSONResponse(status_code=404, content={"detail":"registered member not found; use a member ID or ask them to register"})
+            target = account[0]
+            if conn.execute("SELECT 1 FROM project_members WHERE project_id=? AND member_id=?", (project_id,target)).fetchone(): return JSONResponse(status_code=409, content={"detail":"member already belongs to this project"})
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("INSERT INTO project_members(project_id,member_id) VALUES(?,?)", (project_id,target))
+                conn.execute("INSERT INTO project_membership_state(project_id,member_id,state) VALUES(?,?,'ACTIVE')", (project_id,target))
+                conn.execute("INSERT INTO project_member_roles(project_id,member_id,role) VALUES(?,?,?)", (project_id,target,role))
+                conn.execute("INSERT INTO project_role_audit(project_id,member_id,actor_id,old_role,new_role) VALUES(?,?,?,NULL,?)", (project_id,target,session["member_id"],role))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.rollback(); return JSONResponse(status_code=409, content={"detail":"could not add member to this project"})
+        try: token_read(project_id).add_member(target); ledger_state="READY"
+        except (ValueError,sqlite3.Error,OSError): ledger_state="TOKEN_SETUP_PENDING"
+        return {"projectId":project_id,"memberId":target,"role":role,"tokenLedgerState":ledger_state}
+
+    @app.patch("/api/projects/{project_id}/members/{member_id}/role")
+    def set_project_role(project_id: str, member_id: str, request: Request, body: dict):
+        session=auth_session(request); role=str(body.get("role","")).upper()
+        if role not in {"OWNER","MEMBER","VERIFIER","VIEWER"}: return JSONResponse(status_code=400,content={"detail":"invalid project role"})
+        with sqlite3.connect(db_path) as conn:
+            owner=conn.execute("SELECT 1 FROM project_member_roles WHERE project_id=? AND member_id=? AND role='OWNER'",(project_id,session["member_id"])).fetchone()
+            if not owner and not session["site_admin"]: return JSONResponse(status_code=403,content={"detail":"project owner required"})
+            current=conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?",(project_id,member_id)).fetchone()
+            state=conn.execute("SELECT state FROM project_membership_state WHERE project_id=? AND member_id=?",(project_id,member_id)).fetchone()
+            if not current: return JSONResponse(status_code=404,content={"detail":"project member not found"})
+            if state and state[0]!="ACTIVE": return JSONResponse(status_code=409,content={"detail":"membership is not active"})
+            if current[0]=="OWNER" and role!="OWNER":
+                count=conn.execute("SELECT COUNT(*) FROM project_member_roles r LEFT JOIN project_membership_state s USING(project_id,member_id) WHERE r.project_id=? AND r.role='OWNER' AND COALESCE(s.state,'ACTIVE')='ACTIVE'",(project_id,)).fetchone()[0]
+                if count<=1: return JSONResponse(status_code=409,content={"detail":"cannot remove the last active owner"})
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE project_member_roles SET role=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND member_id=?",(role,project_id,member_id))
+            if role=="OWNER": conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES(?,?)",(project_id,member_id))
+            else: conn.execute("DELETE FROM auth_project_admins WHERE project_id=? AND member_id=?",(project_id,member_id))
+            conn.execute("INSERT INTO project_role_audit(project_id,member_id,actor_id,old_role,new_role) VALUES(?,?,?,?,?)",(project_id,member_id,session["member_id"],current[0],role)); conn.commit()
+        return {"projectId":project_id,"memberId":member_id,"role":role}
+
     @app.get("/api/projects/{project_id}/admins")
     def list_project_admins(project_id: str, request: Request):
         session = auth_session(request)
@@ -567,7 +956,11 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         if not session or not session["site_admin"]: return JSONResponse(status_code=403,content={"detail":"site administrator required"})
         with sqlite3.connect(db_path) as conn:
             if not conn.execute("SELECT 1 FROM auth_accounts WHERE member_id=?",(member_id,)).fetchone(): return JSONResponse(status_code=404,content={"detail":"member must have an account"})
-            try: conn.execute("INSERT INTO auth_project_admins(project_id,member_id) VALUES(?,?)",(project_id,member_id))
+            previous = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?",(project_id,member_id)).fetchone()
+            try:
+                conn.execute("INSERT INTO auth_project_admins(project_id,member_id) VALUES(?,?)",(project_id,member_id))
+                conn.execute("INSERT OR REPLACE INTO project_member_roles(project_id,member_id,role,updated_at) VALUES(?,?,'OWNER',CURRENT_TIMESTAMP)",(project_id,member_id))
+                conn.execute("INSERT INTO project_role_audit(project_id,member_id,actor_id,old_role,new_role) VALUES(?,?,?,?, 'OWNER')",(project_id,member_id,session["member_id"],previous[0] if previous else None))
             except sqlite3.IntegrityError: return JSONResponse(status_code=404,content={"detail":"member is not in this project"})
         return {"projectId":project_id,"memberId":member_id,"admin":True}
 
@@ -827,6 +1220,17 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                              "or migrate with migrate_token_ledger.py")
         return TokenStore(selected)
 
+    def find_contract(contract_id):
+        for candidate in (token_db_path, *sorted((db_path.parent / "token-ledgers").glob("*.sqlite3"))):
+            try:
+                store = TokenStore(candidate)
+                contract = store.ledger.contracts.get(contract_id)
+                if contract:
+                    return store, contract
+            except (ValueError, sqlite3.Error):
+                continue
+        return None, None
+
     def legacy_token_project_archived():
         try: project_id=token_read().project.id
         except (ValueError,sqlite3.Error): return None
@@ -835,7 +1239,7 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         return JSONResponse(status_code=410,content={"detail":"project is archived"}) if row and row[0]!="ACTIVE" else None
 
     def token_write(operation, *args, project_id=None):
-        project_id=project_id or token_project_context.get()
+        project_id=project_id or token_project_context.get() or request_ledger_project.get()
         selected=project_token_path(project_id,create=True) if project_id else active_token_path()
         try:
             if operation == "create_project":
@@ -1085,29 +1489,66 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         return token_write("set_mint_cap", task_id, body.mint_cap)
 
     @app.post("/api/token/contracts", status_code=201)
-    def token_create_contract(body: CommissionInput):
+    def token_create_contract(body: CommissionInput, request: Request):
+        session = auth_session(request)
+        if not session or session["member_id"] != body.principal_id:
+            return JSONResponse(status_code=403, content={"detail":"the signed-in member must be the contract principal"})
         return token_write("create_commission", body.id, body.task_id, body.principal_id,
                            body.contractor_id, body.contract_price, body.maximum_mint_value)
 
     @app.post("/api/token/contracts/{contract_id}/advance")
-    def token_advance_contract(contract_id: str, body: ContractAdvanceInput):
-        return token_write("advance_contract", contract_id, ContractStatus(body.status))
+    def token_advance_contract(contract_id: str, body: ContractAdvanceInput, request: Request):
+        session = auth_session(request); member_id = session["member_id"]
+        token, contract = find_contract(contract_id)
+        if contract is None: return JSONResponse(status_code=404, content={"detail":"unknown contract"})
+        role = None
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (contract.project_id,member_id)).fetchone()
+            role = row[0] if row else None
+        target = ContractStatus(body.status)
+        if target == ContractStatus.DELIVERED:
+            return JSONResponse(status_code=409, content={"detail":"submit delivery evidence through the contractor delivery action"})
+        authorized = ((target == ContractStatus.OFFERED and member_id == contract.principal_id)
+                      or (target == ContractStatus.ACCEPTED and member_id == contract.contractor_id)
+                      or (target == ContractStatus.CREDIT_RESERVED and (member_id == contract.principal_id or role == "OWNER"))
+                      or (target == ContractStatus.VERIFIED and role in {"OWNER", "VERIFIER"}
+                          and member_id not in {contract.principal_id,contract.contractor_id}))
+        if not authorized: return JSONResponse(status_code=403, content={"detail":"current role or contract party cannot perform this transition"})
+        return token_write("advance_contract", contract_id, target, project_id=contract.project_id)
+
+    def token_submit_delivery(contract_id: str, body: ContractDeliveryInput, request: Request):
+        session = auth_session(request)
+        if not session: return JSONResponse(status_code=401, content={"detail":"login required"})
+        token, contract = find_contract(contract_id)
+        if contract is None: return JSONResponse(status_code=404, content={"detail":"unknown contract"})
+        if session["member_id"] != contract.contractor_id:
+            return JSONResponse(status_code=403, content={"detail":"only the assigned contractor can submit delivery evidence"})
+        if not body.evidence or len(body.evidence) > 10 or any(not item.strip() or len(item) > 4096 for item in body.evidence):
+            return JSONResponse(status_code=400, content={"detail":"provide 1 to 10 delivery evidence references, each at most 4096 characters"})
+        return token_write("submit_delivery", contract_id, session["member_id"], body.evidence, project_id=contract.project_id)
+
+    @app.post("/api/token/contracts/{contract_id}/deliver", status_code=201)
+    def token_deliver_contract(contract_id: str, body: ContractDeliveryInput, request: Request):
+        return token_submit_delivery(contract_id, body, request)
 
     @app.post("/api/token/contracts/{contract_id}/approve", status_code=201)
     def token_approve_contract(contract_id: str, body: ContractApprovalInput, request: Request):
         session = auth_session(request)
         member_id = session["member_id"]
-        token = token_read()
-        contract = token.ledger.contracts.get(contract_id)
+        token, contract = find_contract(contract_id)
         if contract is None:
             return JSONResponse(status_code=404, content={"detail": "unknown contract"})
         if member_id not in token.project.member_ids:
             return JSONResponse(status_code=403, content={"detail": "project membership required"})
+        with sqlite3.connect(db_path) as conn:
+            role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (contract.project_id,member_id)).fetchone()
+        if not role or role[0] not in {"OWNER", "VERIFIER"}:
+            return JSONResponse(status_code=403, content={"detail":"Owner or Verifier role required for independent approval"})
         if member_id in {contract.principal_id, contract.contractor_id}:
             return JSONResponse(status_code=403, content={"detail": "contract parties cannot approve"})
         if contract.status != ContractStatus.VERIFIED:
             return JSONResponse(status_code=409, content={"detail": "only verified contracts can be approved"})
-        with sqlite3.connect(active_token_path()) as conn:
+        with sqlite3.connect(project_token_path(contract.project_id)) as conn:
             try:
                 conn.execute("INSERT INTO contract_approvals(contract_id,member_id,note) VALUES(?,?,?)",
                              (contract_id, member_id, body.note.strip()))
@@ -1119,8 +1560,7 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
     def token_dispute_contract(contract_id: str, body: ContractDisputeInput, request: Request):
         session = auth_session(request)
         member_id = session["member_id"]
-        token = token_read()
-        contract = token.ledger.contracts.get(contract_id)
+        token, contract = find_contract(contract_id)
         if contract is None:
             return JSONResponse(status_code=404, content={"detail": "unknown contract"})
         if member_id not in {contract.principal_id, contract.contractor_id} and not session["site_admin"]:
@@ -1128,17 +1568,21 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                 admin = conn.execute("SELECT 1 FROM auth_project_admins WHERE project_id=? AND member_id=?", (contract.project_id, member_id)).fetchone()
             if not admin:
                 return JSONResponse(status_code=403, content={"detail": "contract party or project administrator required"})
-        result = TokenStore(active_token_path()).dispute_contract(contract_id, member_id, body.reason)
+        result = TokenStore(project_token_path(contract.project_id)).dispute_contract(contract_id, member_id, body.reason)
         return result
 
     @app.post("/api/token/contracts/{contract_id}/freeze", status_code=201)
-    def token_freeze_contract(contract_id: str, body: ContractDisputeInput):
-        token = token_read()
-        contract = token.ledger.contracts.get(contract_id)
+    def token_freeze_contract(contract_id: str, body: ContractDisputeInput, request: Request):
+        session = auth_session(request)
+        token, contract = find_contract(contract_id)
         if contract is None:
             return JSONResponse(status_code=404, content={"detail": "unknown contract"})
+        with sqlite3.connect(db_path) as conn:
+            role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (contract.project_id,session["member_id"])).fetchone()
+        if not session["site_admin"] and (not role or role[0] not in {"OWNER", "VERIFIER"}):
+            return JSONResponse(status_code=403, content={"detail":"Owner or Verifier role required to freeze a contract"})
         try:
-            event, payment_sequence = TokenStore(active_token_path()).freeze_contract_payment(contract_id, body.reason)
+            event, payment_sequence = TokenStore(project_token_path(contract.project_id)).freeze_contract_payment(contract_id, body.reason)
         except ValueError as error:
             if "insufficient token balance" in str(error):
                 payment = next((item for item in token.ledger.events if item.id == f"{contract_id}:payment"), None)
@@ -1151,14 +1595,13 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
     @app.post("/api/token/contracts/{contract_id}/resolve")
     def token_resolve_contract(contract_id: str, body: ContractResolutionInput, request: Request):
         session = auth_session(request)
-        token = token_read()
-        contract = token.ledger.contracts.get(contract_id)
+        token, contract = find_contract(contract_id)
         if contract is None:
             return JSONResponse(status_code=404, content={"detail": "unknown contract"})
         if member_id := session["member_id"]:
             if member_id in {contract.principal_id, contract.contractor_id}:
                 return JSONResponse(status_code=403, content={"detail": "contract parties cannot resolve their own contract"})
-        result, events = TokenStore(active_token_path()).resolve_contract(contract_id, body.outcome, body.note,
+        result, events = TokenStore(project_token_path(contract.project_id)).resolve_contract(contract_id, body.outcome, body.note,
                                                                     session["member_id"], body.refund_amount)
         return {"resolution": jsonable_encoder(result, custom_encoder={Decimal: str}),
                 "events": [jsonable_encoder(asdict(event), custom_encoder={Decimal: str}) for event in events]}
@@ -1194,8 +1637,15 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                            body.amount, body.evidence_hashes)
 
     @app.post("/api/token/contracts/{contract_id}/settle")
-    def token_settle(contract_id: str, body: SettleInput):
-        with sqlite3.connect(active_token_path()) as conn:
+    def token_settle(contract_id: str, body: SettleInput, request: Request):
+        session = auth_session(request)
+        token, contract = find_contract(contract_id)
+        if contract is None: return JSONResponse(status_code=404, content={"detail":"unknown contract"})
+        with sqlite3.connect(db_path) as conn:
+            role = conn.execute("SELECT role FROM project_member_roles WHERE project_id=? AND member_id=?", (contract.project_id,session["member_id"])).fetchone()
+        if not role or role[0] not in {"OWNER","VERIFIER"}:
+            return JSONResponse(status_code=403, content={"detail":"Owner or Verifier role required to settle a contract"})
+        with sqlite3.connect(project_token_path(contract.project_id)) as conn:
             approvers = [row[0] for row in conn.execute(
                 "SELECT member_id FROM contract_approvals WHERE contract_id=? ORDER BY approved_at, member_id", (contract_id,))]
         if not approvers:
@@ -1203,11 +1653,14 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         if body.approver_ids and set(body.approver_ids) != set(approvers):
             return JSONResponse(status_code=403, content={"detail": "approver IDs must match recorded approvals"})
         mint, transfer = token_write("settle_commission", contract_id, body.verified_mint_value,
-                                     body.evidence_hashes, approvers)
+                                     body.evidence_hashes, approvers, project_id=contract.project_id)
         return {"mint": mint, "transfer": transfer}
 
     @app.post("/api/token/transfer", status_code=201)
-    def token_transfer(body: TransferInput):
+    def token_transfer(body: TransferInput, request: Request):
+        session = auth_session(request)
+        if not session or body.source_id != session["member_id"]:
+            return JSONResponse(status_code=403, content={"detail":"transfer source must match the signed-in member"})
         return token_write("transfer", body.event_id, body.source_id, body.destination_id,
                            body.amount, body.task_id, body.evidence_hashes)
 
@@ -1246,6 +1699,12 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
             conn.execute("INSERT INTO projects(id,name) VALUES(?,?)",(body.id,body.name))
             conn.execute("INSERT INTO project_lifecycle(project_id,state,token_setup_state) VALUES(?,'ACTIVE','TOKEN_SETUP_PENDING')",(body.id,))
             conn.execute("INSERT INTO project_versions(project_id,version) VALUES(?,1)",(body.id,))
+            if not session["site_admin"]:
+                member_id = session["member_id"]
+                conn.execute("INSERT INTO project_members(project_id,member_id) VALUES(?,?)", (body.id,member_id))
+                conn.execute("INSERT INTO project_membership_state(project_id,member_id,state) VALUES(?,?,'ACTIVE')", (body.id,member_id))
+                conn.execute("INSERT INTO project_member_roles(project_id,member_id,role) VALUES(?,?,'OWNER')", (body.id,member_id))
+                conn.execute("INSERT INTO auth_project_admins(project_id,member_id) VALUES(?,?)", (body.id,member_id))
             conn.commit()
         try:
             ensure_project_ledger(body.id)
@@ -1262,6 +1721,9 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         if not body.reason.strip(): return JSONResponse(status_code=400, content={"detail":"reason is required"})
         store = read(); item = store.contributions.get(contribution_id)
         if item is None: return JSONResponse(status_code=404, content={"detail":"unknown contribution"})
+        with sqlite3.connect(db_path) as conn:
+            life = conn.execute("SELECT state FROM project_lifecycle WHERE project_id=?", (item.project_id,)).fetchone()
+        if not life or life[0] != "ACTIVE": return JSONResponse(status_code=410, content={"detail":"project is archived"})
         if item.contributor_id != member_id: return JSONResponse(status_code=403, content={"detail":"only the contributor may request withdrawal"})
         request_id = uuid4().hex
         with sqlite3.connect(db_path) as conn:
@@ -1493,11 +1955,15 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         return {"id":request_id,"state":body.decision,"memberId":member_id,"accountRetained":True,"accountingState":accounting}
 
     @app.post("/api/projects/{project_id}/members", status_code=201)
-    def add_member(project_id: str, body: MemberInput):
+    def add_member(project_id: str, body: MemberInput, request: Request):
         result = write("add_member", project_id, body.id, body.name)
+        actor = auth_session(request).get("member_id")
         with sqlite3.connect(db_path) as conn:
             conn.execute("INSERT OR IGNORE INTO project_membership_state(project_id,member_id,state) VALUES(?,?,'ACTIVE')",
                          (project_id, body.id))
+            conn.execute("INSERT OR IGNORE INTO project_member_roles(project_id,member_id,role) VALUES(?,?,'MEMBER')", (project_id,body.id))
+            if actor:
+                conn.execute("INSERT INTO project_role_audit(project_id,member_id,actor_id,old_role,new_role) VALUES(?,?,?,NULL,'MEMBER')",(project_id,body.id,actor))
         try:
             result["tokenSync"] = sync_token_entities(project_id)
         except Exception as error:
@@ -1536,6 +2002,8 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
         session = auth_session(request)
         if not session or body.contributor_id != session["member_id"]:
             return JSONResponse(status_code=403, content={"detail":"contributor must match the signed-in member"})
+        if not active_project_member(project_id, session["member_id"]):
+            return JSONResponse(status_code=403, content={"detail":"active project membership required"})
         return write("submit_contribution", project_id, body.id, body.contributor_id,
                      body.task_id, body.type, body.description, body.completion,
                      body.support_value, body.helped_member_id)
@@ -1840,19 +2308,20 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
             if route=="tasks" and method=="POST": return token_add_task(TokenTaskInput.model_validate(data))
             if len(parts)==3 and parts[0]=="tasks" and parts[2]=="cap":
                 return token_set_task_cap(parts[1],TokenCapInput.model_validate(data))
-            if route=="contracts": return token_create_contract(CommissionInput.model_validate(data))
+            if route=="contracts": return token_create_contract(CommissionInput.model_validate(data),request)
             if len(parts)>=2 and parts[0]=="contracts":
                 contract_id=parts[1]
                 if len(parts)==2 and method=="GET":
                     return next((item for item in token_read(project_id).contracts_payload() if item["id"]==contract_id),JSONResponse(status_code=404,content={"detail":"unknown contract"}))
-                if len(parts)==3 and parts[2]=="advance": return token_advance_contract(contract_id,ContractAdvanceInput.model_validate(data))
+                if len(parts)==3 and parts[2]=="advance": return token_advance_contract(contract_id,ContractAdvanceInput.model_validate(data),request)
+                if len(parts)==3 and parts[2]=="deliver": return token_submit_delivery(contract_id,ContractDeliveryInput.model_validate(data),request)
                 if len(parts)==3 and parts[2]=="approve": return token_approve_contract(contract_id,ContractApprovalInput.model_validate(data),request)
                 if len(parts)==3 and parts[2]=="dispute": return token_dispute_contract(contract_id,ContractDisputeInput.model_validate(data),request)
-                if len(parts)==3 and parts[2]=="freeze": return token_freeze_contract(contract_id,ContractDisputeInput.model_validate(data))
+                if len(parts)==3 and parts[2]=="freeze": return token_freeze_contract(contract_id,ContractDisputeInput.model_validate(data),request)
                 if len(parts)==3 and parts[2]=="resolve": return token_resolve_contract(contract_id,ContractResolutionInput.model_validate(data),request)
-                if len(parts)==3 and parts[2]=="settle": return token_settle(contract_id,SettleInput.model_validate(data))
+                if len(parts)==3 and parts[2]=="settle": return token_settle(contract_id,SettleInput.model_validate(data),request)
             if route=="mint": return token_mint(MintInput.model_validate(data))
-            if route=="transfer": return token_transfer(TransferInput.model_validate(data))
+            if route=="transfer": return token_transfer(TransferInput.model_validate(data),request)
             if route=="freeze": return token_freeze(FreezeInput.model_validate(data))
             if route=="release": return token_release(ReleaseInput.model_validate(data))
             if len(parts)==3 and parts[0]=="debts" and parts[2]=="collect": return token_collect_debt(parts[1])

@@ -358,6 +358,8 @@ async function refresh() {
   $("error").hidden = true;
   try {
     const projects = await request("/api/projects");
+    const requestedProject = new URLSearchParams(location.search).get("project");
+    if (requestedProject && projects.some((item) => item.id === requestedProject)) projectId = requestedProject;
     if (!projects.some((item) => item.id === projectId)) projectId = projects[0]?.id ?? "";
     localStorage.setItem("contribution-project", projectId);
     $("project-select").replaceChildren(...projects.map((item) => new Option(item.name, item.id)));

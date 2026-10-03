@@ -4,7 +4,7 @@ const number = (value) => typeof value === "string"
   ? value : new Intl.NumberFormat(I18n.language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 9 }).format(Number(value) || 0);
 const kindName = { MINT: "Mint", TRANSFER: "Transfer", FREEZE: "Freeze", RELEASE: "Release", REFUND: "Refund", SPLIT: "Allocation" };
 const statusName = { DRAFT: "Draft", OFFERED: "Offered", ACCEPTED: "Accepted", CREDIT_RESERVED: "Reserved", DELIVERED: "Delivered", VERIFIED: "Verified", DISPUTED: "Disputed", FROZEN: "Frozen", SETTLED: "Settled", RESOLVED: "Resolved" };
-const nextStatus = { DRAFT: "OFFERED", OFFERED: "ACCEPTED", ACCEPTED: "CREDIT_RESERVED", CREDIT_RESERVED: "DELIVERED", DELIVERED: "VERIFIED", DISPUTED: "FROZEN", FROZEN: "DELIVERED" };
+const nextStatus = { DRAFT: "OFFERED", OFFERED: "ACCEPTED", ACCEPTED: "CREDIT_RESERVED", DELIVERED: "VERIFIED", DISPUTED: "FROZEN" };
 const state = { ledger: null, graph: null, contracts: [], tasks: [], budgets: {}, debts: [], projects: [], projectId: "", busy: false };
 const focusedEventId = new URLSearchParams(location.search).get("event");
 const tokenApi = (path) => `/api/projects/${encodeURIComponent(state.projectId)}/token/${String(path).replace(/^\/api\/token\/?/, "")}`;
@@ -45,9 +45,8 @@ function setBusy(value) {
 }
 const projectName = (id) => state.projects.find((project) => project.id === id)?.name || id;
 const nodeName = (address) => state.graph?.nodes.find((node) => node.address.join("/") === address.join("/"))?.label || address.at(-1);
-function renderGraph() {
+function renderGraph(graph) {
   const svg = $("token-graph");
-  const graph = state.graph;
   const kinds = ["PROJECT", "TREASURY", "MEMBER", "COMMISSION_CONTRACT", "TASK"];
   const columns = kinds.map((kind) => graph.nodes.filter((node) => node.kind === kind));
   const height = Math.max(220, ...columns.map((nodes) => nodes.length * 62 + 38));
@@ -93,6 +92,19 @@ function listEmpty(id, count, messageText) { $(id).hidden = count > 0; if (!coun
 
 function render() {
   const { ledger, graph, contracts, budgets } = state;
+  const kindsByView = {
+    value: new Set(["CONTRIBUTES_TO", "MINTED"]),
+    flow: new Set(["MINTED", "TRANSFER", "SPLIT", "REFUND"]),
+    collaboration: new Set(["COMMISSIONED", "EXECUTED", "CONTRIBUTES_TO", "TRANSFER", "SPLIT"]),
+    trust: new Set(["APPROVED", "DISPUTED", "FROZEN", "RELEASED", "REFUND"]),
+  };
+  const view = $("graph-view").value;
+  localStorage.setItem("contribution-graph-view", view);
+  const viewEdges = graph.edges.filter((edge) => kindsByView[view].has(edge.kind));
+  const activeAddresses = new Set(viewEdges.flatMap((edge) => [edge.source.join("/"), edge.destination.join("/")]));
+  const viewGraph = { nodes: graph.nodes.filter((node) => activeAddresses.has(node.address.join("/"))), edges: viewEdges };
+  const help = { value: "Shows which contribution evidence and verified value created ledger value.", flow: "Shows mint, transfer, split, and refund movements with exact amounts.", collaboration: "Shows commissions, execution, and shared transfers between project participants.", trust: "Shows recorded independent approvals, disputes, freezes, releases, and refunds." };
+  $("graph-view-help").textContent = help[view];
   $("workspace").hidden = false;
   $("setup").hidden = true;
   $("project-name").textContent = `${projectName(ledger.projectId)} · ${ledger.projectId}`;
@@ -117,22 +129,34 @@ function render() {
   selectOptions(".task-select", taskEntries);
   const members = ledger.memberIds.map((id) => [id, id]);
   selectOptions(".member-select", members);
+  const signedInMember = window.HacKUAuth?.identity?.memberId;
+  const principalSelect = $("contract-form").elements.principal_id;
+  selectOptions("#contract-form [name=principal_id]", signedInMember && ledger.memberIds.includes(signedInMember) ? [[signedInMember, signedInMember]] : []);
+  if (principalSelect && signedInMember) principalSelect.value = signedInMember;
     selectOptions("#destination-select", [...members, [ledger.treasuryId, `Treasury · ${ledger.treasuryId}`]]);
   $("contract-list").innerHTML = contracts.map((contract) => {
     const next = nextStatus[contract.status];
     const identity = window.HacKUAuth?.identity || {};
     const member = identity.memberId;
     const party = member === contract.principalId || member === contract.contractorId;
-    const projectAdmin = identity.siteAdmin || identity.projects?.some((project) => project.id === ledger.projectId && project.admin);
+    const memberRole = identity.projects?.find((project) => project.id === ledger.projectId)?.role;
+    const projectAdmin = identity.siteAdmin || memberRole === "OWNER";
+    const canVerify = identity.siteAdmin || ["OWNER", "VERIFIER"].includes(memberRole);
+    const canAdvance = next && ((next === "OFFERED" && member === contract.principalId)
+      || (next === "ACCEPTED" && member === contract.contractorId)
+      || (next === "CREDIT_RESERVED" && (member === contract.principalId || projectAdmin))
+      || (next === "VERIFIED" && canVerify && !party));
     const approvers = contract.approverIds || [];
     const candidates = ledger.memberIds.filter((id) => id !== contract.principalId && id !== contract.contractorId);
-    const canApprove = contract.status === "VERIFIED" && member && identity.projects?.some((project) => project.id === ledger.projectId) && !party && !approvers.includes(member);
-    const canSettle = contract.status === "VERIFIED" && approvers.length > 0 && projectAdmin;
+    const canApprove = contract.status === "VERIFIED" && member && canVerify && !party && !approvers.includes(member);
+    const canSettle = contract.status === "VERIFIED" && approvers.length > 0 && canVerify;
     const canDispute = contract.status === "SETTLED" && party;
-    const canFreeze = contract.status === "DISPUTED" && contract.settled && projectAdmin;
-    const canResolve = contract.status === "FROZEN" && projectAdmin && !party;
+    const canFreeze = contract.status === "DISPUTED" && contract.settled && canVerify;
+    const canResolve = contract.status === "FROZEN" && canVerify && !party;
+    const canDeliver = contract.status === "CREDIT_RESERVED" && member === contract.contractorId;
     const resolution = contract.resolution;
-    return `<article class="token-row contract-row"><div><strong>${safe(contract.id)}</strong><small>${safe(contract.principalId)} → ${safe(contract.contractorId)} · ${safe(contract.taskId)}</small><p>Price ${number(contract.contractPriceExact ?? contract.contractPrice)}; maximum mint ${number(contract.maximumMintValueExact ?? contract.maximumMintValue)}</p>${contract.settled ? `<p>Minted ${number(contract.verifiedMintValueExact ?? contract.verifiedMintValue)}; payment ${number(contract.contractPriceExact ?? contract.contractPrice)}; independent approvers ${safe(approvers.join(", ") || "None")}; evidence ${safe(contract.evidenceHashes.join(", "))}</p>` : ""}${contract.dispute ? `<p>Dispute reason: ${safe(contract.dispute.reason)} · raised by ${safe(contract.dispute.raisedBy)}</p>` : ""}${resolution ? `<p>Resolution ${safe(resolution.outcome)}: refund ${number(resolution.refundAmount)}, contractor retains ${number(resolution.retainedAmount)}. ${safe(resolution.note)}</p>` : ""}</div><div class="contract-action"><span class="contract-status">${safe(statusName[contract.status] || contract.status)}</span>${next ? `<button type="button" data-contract="${safe(contract.id)}" data-next="${next}">Advance to ${safe(statusName[next])}</button>` : ""}${canApprove ? `<button type="button" data-approve="${safe(contract.id)}" data-principal="${safe(contract.principalId)}" data-contractor="${safe(contract.contractorId)}">Approve independently</button>` : ""}${canDispute ? `<button type="button" data-dispute="${safe(contract.id)}" data-principal="${safe(contract.principalId)}" data-contractor="${safe(contract.contractorId)}">Raise dispute</button>` : ""}${canFreeze ? `<button type="button" data-freeze-contract="${safe(contract.id)}">Freeze payment</button>` : ""}</div>${canSettle ? `<form class="settle-form" data-id="${safe(contract.id)}"><label>Verified mint value<input name="verified_mint_value" type="number" min="0.000000001" max="${safe(contract.maximumMintValue)}" step="any" required></label><p>Recorded approvers: ${safe(approvers.join(", "))}</p><label>Evidence IDs<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">Confirm settlement</button></form>` : ""}${canResolve ? `<form class="contract-resolve-form" data-id="${safe(contract.id)}"><label>Outcome<select name="outcome">${contract.settled ? '<option value="RELEASE">Full release</option><option value="REFUND">Full refund</option><option value="SPLIT">Partial split</option>' : '<option value="CANCELLED">Cancel unsettled contract</option>'}</select></label><label class="refund-amount-field">Refund amount<input name="refund_amount" type="number" min="0.000000001" step="any"></label><label>Resolution note<textarea name="note" required></textarea></label><button type="submit">Record resolution</button></form>` : ""}</article>`;
+    const delivery = contract.deliveryEvidence || [];
+    return `<article id="contract-${safe(contract.id)}" class="token-row contract-row"><div><strong>${safe(contract.id)}</strong><small>${safe(contract.principalId)} → ${safe(contract.contractorId)} · ${safe(contract.taskId)}</small><p>Price ${number(contract.contractPriceExact ?? contract.contractPrice)}; maximum mint ${number(contract.maximumMintValueExact ?? contract.maximumMintValue)}</p><p>Next: ${contract.status === "CREDIT_RESERVED" ? `contractor ${safe(contract.contractorId)} must submit delivery evidence` : contract.status === "DELIVERED" ? "an independent verifier must advance verification" : contract.status === "VERIFIED" && !approvers.length ? "an independent project member must approve" : "follow the available contract action"}</p>${delivery.length ? `<p>Delivery evidence: ${safe(delivery.map((item) => item.reference).join(" · "))}</p>` : ""}${contract.settled ? `<p>Minted ${number(contract.verifiedMintValueExact ?? contract.verifiedMintValue)}; payment ${number(contract.contractPriceExact ?? contract.contractPrice)}; independent approvers ${safe(approvers.join(", ") || "None")}; evidence ${safe(contract.evidenceHashes.join(", "))}</p>` : ""}${contract.dispute ? `<p>Dispute reason: ${safe(contract.dispute.reason)} · raised by ${safe(contract.dispute.raisedBy)}</p>` : ""}${resolution ? `<p>Resolution ${safe(resolution.outcome)}: refund ${number(resolution.refundAmount)}, contractor retains ${number(resolution.retainedAmount)}. ${safe(resolution.note)}</p>` : ""}</div><div class="contract-action"><span class="contract-status">${safe(statusName[contract.status] || contract.status)}</span>${canAdvance ? `<button type="button" data-contract="${safe(contract.id)}" data-next="${next}">Advance to ${safe(statusName[next])}</button>` : ""}${canApprove ? `<button type="button" data-approve="${safe(contract.id)}" data-principal="${safe(contract.principalId)}" data-contractor="${safe(contract.contractorId)}">Approve independently</button>` : ""}${canDispute ? `<button type="button" data-dispute="${safe(contract.id)}" data-principal="${safe(contract.principalId)}" data-contractor="${safe(contract.contractorId)}">Raise dispute</button>` : ""}${canFreeze ? `<button type="button" data-freeze-contract="${safe(contract.id)}">Freeze payment</button>` : ""}</div>${canDeliver ? `<form class="delivery-form" data-id="${safe(contract.id)}" data-contractor="${safe(contract.contractorId)}"><label>Delivery evidence<textarea name="evidence" rows="2" maxlength="4096" required placeholder="PR, document, or other evidence URL"></textarea></label><button type="submit">Submit delivery evidence</button></form>` : ""}${canSettle ? `<form class="settle-form" data-id="${safe(contract.id)}"><label>Verified mint value<input name="verified_mint_value" type="number" min="0.000000001" max="${safe(contract.maximumMintValue)}" step="any" required></label><p>Recorded approvers: ${safe(approvers.join(", "))}</p><label>Evidence IDs<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">Confirm settlement</button></form>` : ""}${canResolve ? `<form class="contract-resolve-form" data-id="${safe(contract.id)}"><label>Outcome<select name="outcome">${contract.settled ? '<option value="RELEASE">Full release</option><option value="REFUND">Full refund</option><option value="SPLIT">Partial split</option>' : '<option value="CANCELLED">Cancel unsettled contract</option>'}</select></label><label class="refund-amount-field">Refund amount<input name="refund_amount" type="number" min="0.000000001" step="any"></label><label>Resolution note<textarea name="note" required></textarea></label><button type="submit">Record resolution</button></form>` : ""}</article>`;
   }).join("");
   listEmpty("contract-list", contracts.length, "No commission contracts yet.");
   for (const form of document.querySelectorAll(".contract-resolve-form")) {
@@ -141,11 +165,11 @@ function render() {
   }
   renderEvents();
   renderFreezeOptions();
-  $("graph-summary").textContent = `${graph.nodes.length} nodes · ${graph.edges.length} relationships`;
-  renderGraph();
-  $("graph-nodes").innerHTML = graph.nodes.map((node) => `<span><small>${safe(node.kind)}</small>${safe(node.label)}</span>`).join("");
-  $("graph-list").innerHTML = graph.edges.map((edge) => `<div class="graph-edge"><span>${safe(nodeName(edge.source))}</span><span class="graph-edge-kind">${safe(edge.kind)}${edge.amount == null ? "" : ` · ${number(edge.amount)}`}</span><span>${safe(nodeName(edge.destination))}</span></div>`).join("");
-  listEmpty("graph-list", graph.edges.length, "No relationships yet. They will appear after a contract or ledger event.");
+  $("graph-summary").textContent = `${viewGraph.nodes.length} nodes · ${viewGraph.edges.length} relationships`;
+  renderGraph(viewGraph);
+  $("graph-nodes").innerHTML = viewGraph.nodes.map((node) => `<span><small>${safe(node.kind)}</small>${safe(node.label)}</span>`).join("");
+  $("graph-list").innerHTML = viewGraph.edges.map((edge) => `<div class="graph-edge"><span>${safe(nodeName(edge.source))}</span><span class="graph-edge-kind">${safe(edge.kind)}${edge.amountExact == null ? "" : ` · ${safe(edge.amountExact)}`}</span><span>${safe(nodeName(edge.destination))}</span></div>`).join("");
+  listEmpty("graph-list", viewGraph.edges.length, "No relationships in this view yet. Check another view or return after new project activity.");
   updateTimestamp();
 }
 function updateTimestamp() {
@@ -172,7 +196,8 @@ async function refresh() {
   try {
     state.projects = await request("/api/projects");
     const preferred=localStorage.getItem("contribution-project");
-    state.projectId=state.projects.some((item)=>item.id===preferred)?preferred:(state.projects[0]?.id || "");
+    const requestedProject = new URLSearchParams(location.search).get("project");
+    state.projectId=state.projects.some((item)=>item.id===requestedProject)?requestedProject:(state.projects.some((item)=>item.id===preferred)?preferred:(state.projects[0]?.id || ""));
     selectOptions("#token-project-select", state.projects.map((project) => [project.id, project.name]));
     $("token-project-select").value=state.projectId;
     if(!state.projectId){state.ledger=null;$("workspace").hidden=true;$("setup").hidden=false;$("ledger-state-copy").textContent="No projects are available. Create a project in the Project Dashboard first.";$("retry-ledger").disabled=true;return;}
@@ -290,6 +315,14 @@ $("contract-list").addEventListener("change", (event) => {
   }
 });
 $("contract-list").addEventListener("submit", (event) => {
+  if (event.target.matches(".delivery-form")) {
+    event.preventDefault();
+    const form = event.target;
+    const refs = form.elements.evidence.value.split("\n").map((item) => item.trim()).filter(Boolean);
+    if (!refs.length) { message("Add at least one delivery evidence reference.", true); return; }
+    mutate(tokenApi(`contracts/${encodeURIComponent(form.dataset.id)}/deliver`), { evidence: refs }, "Delivery evidence recorded.");
+    return;
+  }
   if (!event.target.matches(".contract-resolve-form")) return;
   event.preventDefault();
   const form = event.target;
@@ -298,6 +331,9 @@ $("contract-list").addEventListener("submit", (event) => {
   mutate(tokenApi(`contracts/${encodeURIComponent(form.dataset.id)}/resolve`), body, "Final dispute resolution recorded.");
 });
 $("event-filter").addEventListener("change", renderEvents);
+const savedGraphView = localStorage.getItem("contribution-graph-view");
+if (["value", "flow", "collaboration", "trust"].includes(savedGraphView)) $("graph-view").value = savedGraphView;
+$("graph-view").addEventListener("change", () => { if (state.graph) render(); });
 $("freeze-action").addEventListener("change", renderFreezeOptions);
 $("freeze-form").addEventListener("submit", (event) => {
   event.preventDefault();

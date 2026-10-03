@@ -55,3 +55,10 @@
 @media (prefers-color-scheme: dark) { .detail-panel button:not(.queue-item) { color: #103c3d; } .detail-panel button.secondary { color: var(--accent-ink); } .detail-panel button.danger { color: #ffb8a9; border-color: #c47365; } }
 @media (max-width: 1000px) { .review-grid { grid-template-columns: 1fr; } .queue-panel { position: static; } .queue { max-height: 360px; } .intro { align-items: start; } }
 @media (max-width: 650px) { .review-grid .form-grid { grid-template-columns: 1fr; } .review-grid .form-grid .wide { grid-column: 1; } .meta { grid-template-columns: 100px minmax(0, 1fr); } .actor-box { width: 100%; margin-top: 18px; } .queue-panel .section-head { flex-wrap: wrap; } .topbar label { width: 100%; } .topbar #review-project { max-width: min(70vw, 230px); } }
+
+.detail-panel button:not(.queue-item) { border-radius: var(--action-radius); color: var(--action-ink); box-shadow: var(--action-shadow); }
+.detail-panel button:not(.queue-item):hover:not(:disabled) { filter: none; background: var(--accent-ink); border-color: var(--accent-ink); }
+.detail-panel button.secondary, .detail-panel button.danger { box-shadow: none; }
+.detail-panel button.secondary:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent-ink); }
+.detail-panel button.danger:hover:not(:disabled) { background: #fff1ee; border-color: #ba6151; color: #89392e; }
+@media (prefers-color-scheme: dark) { .detail-panel button.danger:hover:not(:disabled) { background: #432a27; color: #ffd9d2; } }

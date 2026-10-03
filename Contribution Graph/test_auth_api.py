@@ -27,7 +27,10 @@ class AuthApiTests(unittest.TestCase):
             store.add_member("p", member, member.title())
         store.add_task("p", "task", "Task", 10)
         store.submit_contribution("p", "c", "alice", "task", "CORE", "Work")
-        self.app = create_app(self.db, Path(self.temp.name) / "token.sqlite3")
+        self.private = Path(self.temp.name) / "empty-private"
+        self.private.mkdir()
+        with patch.dict(os.environ, {"POCKETBAY_PRIVATE_DIR": str(self.private)}):
+            self.app = create_app(self.db, Path(self.temp.name) / "token.sqlite3")
         self.client = AuthenticatedClient(self.app)
         self.addCleanup(self.client.close)
 
@@ -174,7 +177,8 @@ class AuthApiTests(unittest.TestCase):
 
     def test_pocketbay_imports_snapshot_before_creating_identity_tables(self):
         fresh = Path(self.temp.name) / "fresh.sqlite3"
-        with patch.dict(os.environ, {"POCKETBAY_DATA_DIR": self.temp.name}), patch.object(dashboard_server, "DEFAULT_DB", fresh):
+        with patch.dict(os.environ, {"POCKETBAY_DATA_DIR": self.temp.name,
+                                     "POCKETBAY_PRIVATE_DIR": str(self.private)}), patch.object(dashboard_server, "DEFAULT_DB", fresh):
             create_app(fresh, Path(self.temp.name) / "fresh-token.sqlite3")
         with sqlite3.connect(fresh) as conn:
             self.assertGreater(conn.execute("SELECT count(*) FROM projects").fetchone()[0], 0)

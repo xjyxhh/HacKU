@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -49,6 +50,23 @@ class TokenApiTests(unittest.TestCase):
             "id": "recommendation", "name": "Recommendation", "value_type": "CORE",
             "mint_cap": "100", "acceptance_criteria": "Working engine",
         })
+        self.assertEqual(response.status_code, 201, response.text)
+
+    def create_project_ledger(self):
+        self.client._login("_test_admin")
+        self.assertEqual(self.client.post("/api/projects", json={"id": "contracts-project", "name": "FinTech"}).status_code, 201)
+        with sqlite3.connect(self.legacy_db) as conn:
+            for member_id in ("alice", "bob", "charlie", "david"):
+                conn.execute("INSERT OR IGNORE INTO members(id,name) VALUES(?,?)", (member_id, member_id.title()))
+                conn.execute("INSERT OR IGNORE INTO project_members(project_id,member_id) VALUES('contracts-project',?)", (member_id,))
+                conn.execute("INSERT OR IGNORE INTO project_membership_state(project_id,member_id,state) VALUES('contracts-project',?,'ACTIVE')", (member_id,))
+                conn.execute("INSERT OR IGNORE INTO project_member_roles(project_id,member_id,role) VALUES('contracts-project',?,'OWNER')", (member_id,))
+                conn.execute("INSERT OR IGNORE INTO auth_project_admins(project_id,member_id) VALUES('contracts-project',?)", (member_id,))
+        self.client._ensure_accounts()
+        with sqlite3.connect(self.legacy_db) as conn:
+            conn.execute("UPDATE project_lifecycle SET token_setup_state='TOKEN_SETUP_PENDING' WHERE project_id='contracts-project'")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/setup/retry", json={}).status_code, 200)
+        response = self.client.post("/api/projects/contracts-project/tasks", json={"id": "commission-task", "name": "Commission task", "task_value": "100", "description": "Working engine"})
         self.assertEqual(response.status_code, 201, response.text)
 
     def test_token_writes_require_a_session(self):
@@ -288,62 +306,91 @@ class TokenApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_contract_lifecycle_and_settlement(self):
-        self.create_ledger()
-        response = self.client.post("/api/token/contracts", json={
-            "id": "c1", "task_id": "recommendation", "principal_id": "alice",
+        self.create_project_ledger()
+        response = self.client.post("/api/projects/contracts-project/token/contracts", json={
+            "id": "c1", "task_id": "commission-task", "principal_id": "alice",
             "contractor_id": "bob", "contract_price": "50", "maximum_mint_value": "60",
         })
-        self.assertEqual(response.status_code, 201, response.text)
-        for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "VERIFIED"):
-            response = self.client.post("/api/token/contracts/c1/advance", json={"status": status})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.client._login("alice")
+        for status in ("OFFERED",):
+            response = self.client.post("/api/projects/contracts-project/token/contracts/c1/advance", json={"status": status})
             self.assertEqual(response.status_code, 200, response.text)
-        response = self.client.post("/api/token/contracts/c1/advance", json={"status": "SETTLED"})
-        self.assertEqual(response.status_code, 400)  # invalid transition
-        response = self.client.post("/api/token/contracts/c1/settle", json={
+        self.client._login("bob")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/c1/advance", json={"status": "ACCEPTED"}).status_code, 200)
+        self.client._login("alice")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/c1/advance", json={"status": "CREDIT_RESERVED"}).status_code, 200)
+        self.client._login("bob")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/c1/deliver", json={"evidence": ["deliverable:c1"]}).status_code, 200)
+        self.client._login("charlie")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/c1/advance", json={"status": "VERIFIED"}).status_code, 200)
+        self.client._login("alice")
+        response = self.client.post("/api/projects/contracts-project/token/contracts/c1/advance", json={"status": "SETTLED"})
+        self.assertEqual(response.status_code, 403)  # no party may bypass settlement approval
+        self.client._login("charlie")
+        response = self.client.post("/api/projects/contracts-project/token/contracts/c1/settle", json={
             "verified_mint_value": "60", "evidence_hashes": ["sha:done"],
             "approver_ids": ["alice"],
         })
         self.assertEqual(response.status_code, 409)  # no recorded approval exists yet
         self.client._login("charlie")
-        self.assertEqual(self.client.post("/api/token/contracts/c1/approve", json={"note": "Independent check"}).status_code, 201)
-        response = self.client.post("/api/token/contracts/c1/settle", json={
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/c1/approve", json={"note": "Independent check"}).status_code, 200)
+        response = self.client.post("/api/projects/contracts-project/token/contracts/c1/settle", json={
             "verified_mint_value": "60", "evidence_hashes": ["sha:done"],
             "approver_ids": ["alice"],
         })
         self.assertEqual(response.status_code, 403, response.text)
-        response = self.client.post("/api/token/contracts/c1/settle", json={
+        response = self.client.post("/api/projects/contracts-project/token/contracts/c1/settle", json={
             "verified_mint_value": "60", "evidence_hashes": ["sha:done"],
             "approver_ids": ["charlie"],
         })
         self.assertEqual(response.status_code, 200, response.text)
-        ledger = self.client.get("/api/token/ledger").json()
+        ledger = self.client.get("/api/projects/contracts-project/token/ledger").json()
         self.assertEqual(ledger["balances"]["alice"], 10.0)
         self.assertEqual(ledger["balances"]["bob"], 50.0)
-        contracts = self.client.get("/api/token/contracts").json()
+        contracts = self.client.get("/api/projects/contracts-project/token/contracts").json()
         self.assertEqual(contracts[0]["status"], "SETTLED")
         self.assertEqual(contracts[0]["verifiedMintValue"], 60.0)
         self.assertEqual(contracts[0]["approverIds"], ["charlie"])
 
     def test_contract_dispute_path_stops_settlement(self):
-        self.create_ledger()
-        response = self.client.post("/api/token/contracts", json={
-            "id": "disputed", "task_id": "recommendation", "principal_id": "alice",
+        self.create_project_ledger()
+        response = self.client.post("/api/projects/contracts-project/token/contracts", json={
+            "id": "disputed", "task_id": "commission-task", "principal_id": "alice",
             "contractor_id": "bob", "contract_price": "20", "maximum_mint_value": "30",
         })
-        self.assertEqual(response.status_code, 201, response.text)
-        for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "DISPUTED", "FROZEN"):
-            response = self.client.post("/api/token/contracts/disputed/advance", json={"status": status})
-            self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.client.get("/api/token/contracts").json()[0]["status"], "FROZEN")
-        response = self.client.post("/api/token/contracts/disputed/settle", json={
+        self.assertEqual(response.status_code, 200, response.text)
+        self.client._login("alice")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/advance", json={"status": "OFFERED"}).status_code, 200)
+        self.client._login("bob")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/advance", json={"status": "ACCEPTED"}).status_code, 200)
+        self.client._login("alice")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/advance", json={"status": "CREDIT_RESERVED"}).status_code, 200)
+        self.client._login("bob")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/deliver", json={"evidence": ["deliverable:disputed"]}).status_code, 200)
+        self.client._login("charlie")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/advance", json={"status": "VERIFIED"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/approve", json={"note": "Independent"}).status_code, 200)
+        settled = self.client.post("/api/projects/contracts-project/token/contracts/disputed/settle", json={
+            "verified_mint_value": "20", "evidence_hashes": ["sha:disputed"], "approver_ids": ["charlie"],
+        })
+        self.assertEqual(settled.status_code, 200, settled.text)
+        self.client._login("alice")
+        self.assertEqual(self.client.post("/api/projects/contracts-project/token/contracts/disputed/dispute", json={"reason": "Incomplete delivery"}).status_code, 200)
+        self.client._login("_test_admin")
+        frozen = self.client.post("/api/projects/contracts-project/token/contracts/disputed/freeze", json={"reason": "Secure payment"})
+        self.assertEqual(frozen.status_code, 200, frozen.text)
+        self.assertEqual(self.client.get("/api/projects/contracts-project/token/contracts").json()[0]["status"], "FROZEN")
+        self.client._login("charlie")
+        response = self.client.post("/api/projects/contracts-project/token/contracts/disputed/settle", json={
             "verified_mint_value": "20", "evidence_hashes": ["sha:disputed"],
             "approver_ids": ["charlie"],
         })
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(self.client.get("/api/token/ledger").json()["totalSupply"], 0.0)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.client.get("/api/projects/contracts-project/token/ledger").json()["totalSupply"], 0.0)
         for status in ("DELIVERED", "VERIFIED"):
-            response = self.client.post("/api/token/contracts/disputed/advance", json={"status": status})
-            self.assertEqual(response.status_code, 200, response.text)
+            response = self.client.post("/api/projects/contracts-project/token/contracts/disputed/advance", json={"status": status})
+            self.assertNotEqual(response.status_code, 200, response.text)
 
     def test_confirm_mints_into_token_ledger(self):
         self.create_ledger()

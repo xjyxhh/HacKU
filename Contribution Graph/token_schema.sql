@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS contract_approvals (
     note TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (contract_id, member_id)
 );
+CREATE TABLE IF NOT EXISTS contract_delivery_evidence (
+    contract_id TEXT NOT NULL REFERENCES commission_contracts(id),
+    member_id TEXT NOT NULL,
+    evidence TEXT NOT NULL CHECK (length(trim(evidence)) > 0 AND length(evidence) <= 4096),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (contract_id, member_id, evidence)
+);
 
 CREATE TABLE IF NOT EXISTS contract_disputes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

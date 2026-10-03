@@ -16,3 +16,5 @@ hacku-auth-seed.json
 Contribution Graph.zip
 output/
 .playwright-cli/
+
+Contribution Graph/.local-demo/

@@ -6,7 +6,7 @@
     const response = await fetch("/api/auth/me", { cache: "no-store" });
     identity = await response.json();
     const status = document.getElementById("auth-status");
-    if (status) status.textContent = identity.authenticated ? `Signed in: ${identity.memberId}` : "Read-only access";
+    if (status) status.textContent = identity.authenticated ? `Signed in: ${identity.displayName || identity.memberId}` : "Read-only access";
     const login = document.getElementById("auth-login");
     if (login) login.hidden = identity.authenticated;
     const logout = document.getElementById("auth-logout");
@@ -18,22 +18,42 @@
     const changePassword = document.getElementById("change-password");
     if (changePassword) changePassword.hidden = !identity.authenticated;
     const activeProject = document.getElementById("project-select")?.value || document.getElementById("review-project")?.value || document.getElementById("token-project-select")?.value;
-    const isAdmin = identity.siteAdmin || identity.projects?.some((project) => project.id === activeProject && project.admin);
+    const currentProject = identity.projects?.find((project) => project.id === activeProject);
+    const role = currentProject?.role || (currentProject?.admin ? "OWNER" : null);
+    const isAdmin = identity.siteAdmin || role === "OWNER";
+    const canVerify = identity.siteAdmin || role === "OWNER" || role === "VERIFIER";
     document.querySelectorAll("form:not(#auth-form) button, form:not(#auth-form) input, form:not(#auth-form) select, form:not(#auth-form) textarea").forEach((control) => {
       const form = control.closest("form");
       if (form?.matches('[data-lifecycle], #request-unwind, #decide-unwind')) return;
-      const allowed = identity.authenticated && (form?.id === "contribution-form" || form?.id === "evidence-form" || form?.id === "score-form" || isAdmin);
+      const allowed = identity.authenticated && (
+        (["profile-form", "email-form", "project-form"].includes(form?.id))
+        ||
+        (["contribution-form", "evidence-form"].includes(form?.id) && ["OWNER", "MEMBER", "VERIFIER"].includes(role))
+        || (form?.id === "score-form" && canVerify)
+        || (form?.id === "contract-form" && ["OWNER", "MEMBER"].includes(role))
+        || (form?.matches(".delivery-form") && form.dataset.contractor === identity.memberId)
+        || (form?.matches(".settle-form, .contract-resolve-form") && canVerify)
+        || isAdmin
+      );
+      if (form?.id === "register-form") {
+        control.disabled = identity.authenticated;
+        return;
+      }
       control.disabled = !allowed;
     });
-    document.querySelectorAll(".token-section button, .action-buttons button, #migrate, #reconcile, #sync-legacy").forEach((control) => { control.disabled = !isAdmin; });
+    document.querySelectorAll(".action-buttons button, #migrate, #reconcile, #sync-legacy").forEach((control) => { control.disabled = !isAdmin; });
     document.querySelectorAll("[data-approve]").forEach((control) => {
       const isParty = identity.memberId === control.dataset.principal || identity.memberId === control.dataset.contractor;
-      control.disabled = !identity.authenticated || isParty;
+      control.disabled = !identity.authenticated || !canVerify || isParty;
     });
     document.querySelectorAll("[data-dispute]").forEach((control) => {
       const isParty = identity.memberId === control.dataset.principal || identity.memberId === control.dataset.contractor;
       control.disabled = !identity.authenticated || !isParty;
     });
+    const registerForm = document.getElementById("register-form");
+    registerForm?.querySelectorAll("input, button").forEach((control) => { control.disabled = identity.authenticated; });
+    const projectForm = document.getElementById("project-form");
+    projectForm?.querySelectorAll("input, button").forEach((control) => { control.disabled = !identity.authenticated; });
     const invitePanel = document.getElementById("invite-panel");
     if (invitePanel) invitePanel.hidden = !isAdmin;
     window.dispatchEvent(new CustomEvent("hacku:identity", {detail: identity}));
@@ -46,7 +66,7 @@
     const login = document.createElement("button"); login.id = "auth-login"; login.className = "refresh-button"; login.type = "button"; login.textContent = "Log in";
     const logout = document.createElement("button"); logout.id = "auth-logout"; logout.className = "refresh-button"; logout.type = "button"; logout.textContent = "Log out"; logout.hidden = true;
     const dialog = document.createElement("dialog"); dialog.className = "auth-dialog";
-    dialog.innerHTML = '<form id="auth-form"><h2>Member login</h2><label>Member ID<input name="member_id" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><p id="auth-error" role="alert"></p><div><button type="button" id="auth-cancel">Cancel</button><button type="submit">Log in</button></div></form>';
+    dialog.innerHTML = '<form id="auth-form"><h2>Member login</h2><label>Member ID or email<input name="member_id" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><p id="auth-error" role="alert"></p><p><a href="/register.html">Create an account</a> · <a href="/demo.html">View public demo</a></p><div><button type="button" id="auth-cancel">Cancel</button><button type="submit">Log in</button></div></form>';
     actions.append(status, login, logout); document.body.append(dialog);
     const settings = document.querySelector(".settings-menu");
     if (settings) {

@@ -171,8 +171,9 @@ async function reloadData() {
   renderDetail();
   const projects = await request("/api/projects");
   const preferred = localStorage.getItem("contribution-project") || "fintech";
-  const projectId = projects.some((project) => project.id === preferred)
-    ? preferred : projects[0]?.id;
+  const requestedProject = new URLSearchParams(location.search).get("project");
+  const projectId = projects.some((project) => project.id === requestedProject) ? requestedProject
+    : projects.some((project) => project.id === preferred) ? preferred : projects[0]?.id;
   $("review-project").replaceChildren(...projects.map((project) => new Option(project.name, project.id)));
   if (!projectId) {
     state.dashboard = null;
@@ -182,9 +183,12 @@ async function reloadData() {
     return;
   }
   $("review-project").value = projectId;
+  localStorage.setItem("contribution-project", projectId);
   state.dashboard = await request(`/api/projects/${encodeURIComponent(projectId)}/dashboard`);
   const rows = visibleContributions();
-  if (!rows.some((item) => item.id === state.selectedId)) state.selectedId = rows[0]?.id ?? null;
+  const requestedContribution = new URLSearchParams(location.search).get("contribution");
+  state.selectedId = rows.some((item) => item.id === requestedContribution) ? requestedContribution
+    : rows.some((item) => item.id === state.selectedId) ? state.selectedId : rows[0]?.id ?? null;
   renderProject();
   if (state.selectedId) state.detail = await request(`/api/contributions/${encodeURIComponent(state.selectedId)}`);
   renderDetail();
