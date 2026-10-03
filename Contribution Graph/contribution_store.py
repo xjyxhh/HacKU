@@ -74,18 +74,24 @@ def _write(method):
 
 
 class ContributionStore:
-    def __init__(self, path):
+    def __init__(self, path, read_only: bool = False):
         self.path = Path(path)
+        self.read_only = read_only
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = None
         with self._connect() as conn:
-            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").fetchone():
+            if read_only and not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").fetchone():
+                raise ValueError(f"no contribution data in {self.path}")
+            if not read_only and not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").fetchone():
                 conn.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
             self._load(conn)
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=10)
+        if self.read_only:
+            conn = sqlite3.connect(f"file:{self.path.resolve()}?mode=ro", uri=True, timeout=10)
+        else:
+            conn = sqlite3.connect(self.path, timeout=10)
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn

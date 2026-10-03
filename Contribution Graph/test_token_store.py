@@ -92,6 +92,36 @@ class TokenStoreTests(unittest.TestCase):
         self.assertEqual(reopened.balance("bob"), Decimal("15"))
         self.assertEqual(reopened.total_supply(), Decimal("40"))
 
+    def test_transfer_to_treasury_is_allowed(self):
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        store.transfer("e2", "alice", "treasury", "10", "recommendation", ["sha:b"])
+        reopened = self.open_store()
+        self.assertEqual(reopened.balance("alice"), Decimal("30"))
+        self.assertEqual(reopened.total_supply(), Decimal("40"))
+
+    def test_concurrent_writes_do_not_lose_updates(self):
+        import threading
+        store = self.new_store()
+        store.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        errors = []
+
+        def worker():
+            try:
+                TokenStore(self.db).mint_direct(
+                    f"e-{threading.get_ident()}", "recommendation", "bob", "1", [f"sha:{threading.get_ident()}"],
+                )
+            except ValueError as error:
+                errors.append(str(error))
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])  # in-flight replay means no stale-write rejections
+        self.assertEqual(self.open_store().balance("bob"), Decimal("4"))
+
     def test_commission_settlement_survives_reopen(self):
         store = self.new_store()
         self.verified_contract(store)
@@ -170,6 +200,28 @@ class TokenStoreTests(unittest.TestCase):
         self.assertEqual(budget["minted"], Decimal("0"))
         self.assertEqual(budget["reserved"], Decimal("60"))
         self.assertEqual(budget["available"], Decimal("40"))
+
+    def test_freeze_release_survives_reopen(self):
+        store = self.new_store()
+        mint = store.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        store.freeze_events([mint.sequence], "争议")
+        reopened = self.open_store()
+        self.assertEqual(reopened.balance("alice"), Decimal("0"))
+        reopened.release_events([mint.sequence], "解决")
+        self.assertEqual(self.open_store().balance("alice"), Decimal("40"))
+        live = store.ledger
+        replayed = self.open_store().ledger
+        self.assertEqual(replayed._frozen_events, live._frozen_events)
+
+    def test_open_without_project_rejects_when_file_has_no_ledger(self):
+        with self.assertRaises(ValueError):
+            TokenStore(self.db)
+
+    def test_create_project_rejects_any_existing_ledger(self):
+        self.new_store()
+        other = TokenProject("other", "Other", "treasury", ("alice", "bob"))
+        with self.assertRaises(ValueError):
+            TokenStore(self.db, other)
 
     def test_ledger_payload_shape(self):
         store = self.new_store()

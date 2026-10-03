@@ -13,9 +13,19 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from contribution_engine import ContributionType, EvidenceType, VerificationDecision
+from contribution_engine import (
+    ContributionType,
+    EvidenceType,
+    VerificationDecision,
+    contribution_score,
+)
 from contribution_store import ContributionStore
-from token_engine import TokenProject
+from token_engine import (
+    ContractStatus,
+    TokenProject,
+    TokenTask,
+    ValueType,
+)
 from token_store import TokenStore
 
 
@@ -190,15 +200,18 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
 
     def token_write(operation, *args):
         store = TokenStore(token_db_path) if token_db_path.is_file() else None
-        if operation == "create_project":
-            if store is not None:
-                raise ValueError("token ledger already exists for this server; refusing to overwrite")
-            store = TokenStore(token_db_path, *args)
-            return store.ledger_payload()
-        if store is None:
-            raise ValueError("unknown token ledger; create it via POST /api/token/project")
-        result = getattr(store, operation)(*args)
-        return jsonable_encoder(result, custom_encoder={Decimal: str})
+        try:
+            if operation == "create_project":
+                store = TokenStore(token_db_path, *args)
+                return store.ledger_payload()
+            if store is None:
+                raise ValueError("unknown token ledger; create it via POST /api/token/project")
+            result = getattr(store, operation)(*args)
+            return jsonable_encoder(result, custom_encoder={Decimal: str})
+        except sqlite3.Error as error:
+            # Storage-level failures (locks, corruption, constraint races) are
+            # reported as bad requests, not unhandled 500s.
+            raise ValueError(f"token ledger storage error: {error}") from error
 
     @app.get("/api/token/ledger")
     def token_ledger(response: Response):
@@ -227,7 +240,6 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
 
     @app.post("/api/token/tasks", status_code=201)
     def token_add_task(body: TokenTaskInput):
-        from token_engine import TokenTask, ValueType
         task = TokenTask(body.id, token_read().project.id, body.name, ValueType(body.value_type),
                          body.mint_cap, body.acceptance_criteria)
         return token_write("add_task", task)
@@ -239,7 +251,6 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
 
     @app.post("/api/token/contracts/{contract_id}/advance")
     def token_advance_contract(contract_id: str, body: ContractAdvanceInput):
-        from token_engine import ContractStatus
         return token_write("advance_contract", contract_id, ContractStatus(body.status))
 
     @app.post("/api/token/mint", status_code=201)
@@ -292,46 +303,64 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
     def review_contribution(contribution_id: str, body: ReviewInput):
         result = write("review_contribution", contribution_id, body.reviewer_id, body.decision,
                        body.note, body.completion, body.support_value, body.quality)
-        if body.decision == VerificationDecision.CONFIRM:
+        # CONFIRM and ADJUST both move a PENDING contribution to VERIFIED, so
+        # both must mint; DISPUTE freezes any tokens the contribution already
+        # minted. Every outcome is best-effort and never changes the legacy
+        # review result that was already committed above.
+        if body.decision in (VerificationDecision.CONFIRM, VerificationDecision.ADJUST):
             minted = _token_mint_for_contribution(contribution_id, body.reviewer_id)
             if minted is not None:
                 result["tokenMint"] = minted
+        elif body.decision == VerificationDecision.DISPUTE:
+            frozen = _token_freeze_for_contribution(contribution_id, body.note)
+            if frozen is not None:
+                result["tokenFrozen"] = frozen
         return result
 
     @app.post("/api/contributions/{contribution_id}/resolve")
     def resolve_dispute(contribution_id: str, body: ResolutionInput):
         result = write("resolve_dispute", contribution_id, body.resolved_by, body.resolution,
                        body.completion, body.support_value, body.quality)
-        minted = _token_mint_for_contribution(contribution_id, body.resolved_by)
-        if minted is not None:
-            result["tokenMint"] = minted
+        # Dispute resolution restores frozen tokens first, then corrects the
+        # released amount to the dispute's final score. When the final score
+        # equals the frozen amount this is exactly "release"; when it differs
+        # the delta is minted (higher) or paid back to the treasury (lower).
+        # All best-effort: failures are reported, never thrown, and the
+        # already-committed legacy resolution is never affected.
+        token_result = _token_resolve_for_contribution(contribution_id, body.resolved_by,
+                                                       body.resolution)
+        if token_result is not None:
+            result["tokenResolved"] = token_result
         return result
+
+    def _legacy_score(contribution_id):
+        legacy = read()
+        item = legacy.contributions[contribution_id]
+        project = legacy.projects[item.project_id]
+        return item, contribution_score(item, project, legacy.members, legacy.tasks)
 
     def _token_mint_for_contribution(contribution_id: str, approver_id: str):
         """Best-effort token minting after a legacy VERIFIED / RESOLVED transition.
 
-        The legacy write is already committed at this point. A missing token
-        ledger, an unmappable contribution (SUPPORT without helped member,
-        zero score), or an engine rejection is reported in the response as a
-        skip reason instead of failing the review itself. Evidence idempotency
-        keys ("legacy:<id>") make repeat calls no-ops-safe.
+        A missing token ledger, an unmappable contribution, or an engine
+        rejection is reported in the response as a skip reason instead of
+        failing the review itself. Evidence idempotency keys ("legacy:<id>")
+        make repeat calls no-ops-safe.
         """
         if not token_db_path.is_file():
             return None
         try:
-            legacy = read()
-            item = legacy.contributions[contribution_id]
-            store = TokenStore(token_db_path)
-            from contribution_engine import contribution_score
-            amount = contribution_score(item, legacy.projects[item.project_id],
-                                        legacy.members, legacy.tasks)
+            item, amount = _legacy_score(contribution_id)
             if amount <= 0:
                 return {"skipped": "有效得分为 0，无法铸币"}
             key = [f"legacy:{item.id}"]
+            store = _open_token_store()
             if item.type == ContributionType.SUPPORT:
                 if item.helped_member_id is None:
                     return {"skipped": "SUPPORT 缺少受帮助成员，无法构成委托合约"}
                 contract_id = f"{item.id}:commission"
+                if contract_id in store.ledger.contracts:
+                    return {"skipped": "委托合约已存在（此前已铸币或已结算）"}
                 store.create_commission(contract_id, item.task_id, item.helped_member_id,
                                         item.contributor_id, amount, amount)
                 for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "VERIFIED"):
@@ -343,11 +372,129 @@ def create_app(db_path=DEFAULT_DB, token_db_path=None):
                 return {"kind": "COMMISSION", "contractId": contract_id,
                         "mintEventId": mint.id, "transferEventId": transfer.id,
                         "amount": float(amount)}
-            event = store.mint_direct(f"{item.id}:mint", item.task_id, item.contributor_id,
+            mint_event_id = f"{item.id}:mint"
+            if any(event.id == mint_event_id for event in store.ledger.events):
+                return {"skipped": "直接铸币已存在（此前已铸币）"}
+            event = store.mint_direct(mint_event_id, item.task_id, item.contributor_id,
                                       amount, key)
             return {"kind": "DIRECT", "eventId": event.id, "amount": float(amount)}
-        except ValueError as error:
-            return {"skipped": str(error)}
+        except Exception as error:
+            # Any ledger failure (engine rejection, sqlite, disk, schema drift)
+            # must never surface as an error after the legacy write already
+            # committed; the dashboard behaves exactly as before fusion.
+            return {"skipped": f"{type(error).__name__}: {error}"}
+
+    def _frozen_legacy_mints(contribution_id: str):
+        """Sequences of MINT events already recorded for this contribution."""
+        store = _open_token_store()
+        frozen = {event.destination_id for event in store.ledger.events
+                  if event.kind.name == "FREEZE"}
+        return [
+            event.sequence for event in store.ledger.events
+            if event.kind.name == "MINT"
+            and (event.id == f"{contribution_id}:mint"
+                 or event.contract_id == f"{contribution_id}:commission")
+            and event.sequence not in frozen
+        ]
+
+    def _token_freeze_for_contribution(contribution_id: str, reason: str):
+        """Freeze tokens minted for this contribution when it enters DISPUTED."""
+        if not token_db_path.is_file():
+            return None
+        try:
+            sequences = _frozen_legacy_mints(contribution_id)
+            if not sequences:
+                return {"skipped": "没有需要冻结的铸币记录"}
+            store = _open_token_store()
+            events = store.freeze_events(sequences, reason.strip() or "争议冻结",
+                                         tag=contribution_id)
+            return {"kind": "FREEZE", "eventIds": [event.id for event in events],
+                    "sequences": [event.sequence for event in events]}
+        except Exception as error:
+            return {"skipped": f"{type(error).__name__}: {error}"}
+
+    def _open_token_store():
+        """Open the ledger, converting storage failures into skipped markers."""
+        try:
+            return TokenStore(token_db_path)
+        except sqlite3.Error as error:
+            raise ValueError(f"token ledger storage error: {error}") from error
+
+    def _token_release_for_contribution(contribution_id: str, note: str):
+        """Release frozen tokens; returns None when nothing is frozen."""
+        if not token_db_path.is_file():
+            return None
+        try:
+            store = _open_token_store()
+            sequences = [
+                event.sequence for event in store.ledger.events
+                if event.kind.name == "MINT"
+                and (event.id == f"{contribution_id}:mint"
+                     or event.contract_id == f"{contribution_id}:commission")
+                and event.sequence in store.ledger._frozen_events
+            ]
+            if not sequences:
+                return None
+            events = store.release_events(sequences, note.strip() or "争议已解决",
+                                          tag=contribution_id)
+            return {"kind": "RELEASE", "eventIds": [event.id for event in events],
+                    "sequences": [event.sequence for event in events]}
+        except Exception as error:
+            return {"skipped": f"{type(error).__name__}: {error}"}
+
+    def _token_resolve_for_contribution(contribution_id: str, approver_id: str, note: str):
+        """Reconcile the token ledger after a dispute resolves.
+
+        Releases any tokens frozen during the dispute, then corrects the
+        released amount to the dispute's final score: mints the difference
+        when the final score is higher, or transfers the difference back to
+        the treasury when it is lower. When there is nothing frozen (the
+        contribution was disputed before minting), falls back to a normal
+        mint for the final score.
+        """
+        if not token_db_path.is_file():
+            return None
+        try:
+            released = _token_release_for_contribution(contribution_id, note)
+            item, final_amount = _legacy_score(contribution_id)
+            store = _open_token_store()
+            mints = [
+                event for event in store.ledger.events
+                if event.kind.name == "MINT"
+                and (event.id == f"{contribution_id}:mint"
+                     or event.contract_id == f"{contribution_id}:commission")
+            ]
+            frozen_amount = sum((event.amount for event in mints), Decimal("0"))
+            if not mints:
+                # Disputed before any mint happened: resolve mints the final score.
+                minted = _token_mint_for_contribution(contribution_id, approver_id)
+                if minted is not None and "skipped" not in minted:
+                    return {"released": released, "minted": minted,
+                            "finalAmount": float(final_amount)}
+                return {"released": released, "finalAmount": float(final_amount)}
+            if final_amount <= 0:
+                # Resolved to zero: the release already removed the tokens.
+                return {"released": released, "finalAmount": 0.0}
+            delta = final_amount - frozen_amount
+            if delta == 0:
+                return {"released": released, "finalAmount": float(final_amount)}
+            if delta > 0:
+                event = store.mint_direct(
+                    f"{contribution_id}:adjust-mint", item.task_id, item.contributor_id,
+                    delta, [f"legacy:{item.id}:resolve:{note.strip() or 'resolved'}"],
+                )
+                correction = {"kind": "MINT", "eventId": event.id, "amount": float(delta)}
+            else:
+                event = store.transfer(
+                    f"{contribution_id}:refund", item.contributor_id,
+                    store.project.treasury_id, -delta, item.task_id,
+                    [f"legacy:{item.id}:resolve:{note.strip() or 'resolved'}"],
+                )
+                correction = {"kind": "REFUND", "eventId": event.id, "amount": float(-delta)}
+            return {"released": released, "correction": correction,
+                    "finalAmount": float(final_amount)}
+        except Exception as error:
+            return {"skipped": f"{type(error).__name__}: {error}"}
 
     app.mount("/", StaticFiles(directory=ROOT, html=True), name="dashboard")
     return app

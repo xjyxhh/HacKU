@@ -150,6 +150,7 @@ class TokenLedger:
         self._event_ids: set[str] = set()
         self._minted_evidence: set[str] = set()
         self._settled_contracts: set[str] = set()
+        self._frozen_events: dict[int, set[int]] = {}
 
     def add_task(self, task: TokenTask) -> None:
         if task.id in self.tasks or task.project_id != self.project.id:
@@ -274,7 +275,8 @@ class TokenLedger:
     def transfer(self, event_id: str, source_id: str, destination_id: str, amount, task_id: str,
                  evidence_hashes) -> LedgerEvent:
         self._member(source_id)
-        self._member(destination_id)
+        if destination_id != self.project.treasury_id:
+            self._member(destination_id)
         self._task(task_id)
         if source_id == destination_id:
             raise ValueError("source and destination must be different")
@@ -284,18 +286,82 @@ class TokenLedger:
         return self._event(event_id, LedgerEventType.TRANSFER, value, source_id, destination_id,
                            task_id, None, evidence_key(evidence_hashes), "member transfer")
 
+    def freeze_events(self, sequences: Iterable[int], reason: str = "",
+                      tag: str | None = None) -> list[LedgerEvent]:
+        """Freeze previously settled events so they stop counting in balances.
+
+        Creates an append-only FREEZE record per settled event instead of
+        reversing it, matching the dispute state machine (DISPUTED -> FROZEN).
+        Already frozen sequences are skipped so repeated calls stay idempotent.
+        ``tag`` labels the freeze record (e.g. the contribution id) in
+        destination_id so callers can find freezes by business key later.
+        """
+        events: list[LedgerEvent] = []
+        reason = reason.strip()
+        for sequence in sequences:
+            target = self._event_by_sequence(sequence)
+            if target.kind != LedgerEventType.MINT:
+                raise ValueError("only MINT events can be frozen")
+            frozen = self._frozen_events.setdefault(sequence, set())
+            if len(frozen) >= 1:
+                continue
+            events.append(self._event(
+                f"freeze:{target.id}", LedgerEventType.FREEZE, target.amount,
+                target.destination_id, tag or str(sequence), target.task_id,
+                target.contract_id, target.evidence_key,
+                reason or "dispute freeze",
+            ))
+            frozen.add(len(events))
+        return events
+
+    def release_events(self, sequences: Iterable[int], note: str = "",
+                       tag: str | None = None) -> list[LedgerEvent]:
+        """Release frozen events back into balances after a dispute resolves.
+
+        ``tag`` must match the tag the FREEZE records were created with.
+        """
+        events: list[LedgerEvent] = []
+        for sequence in sequences:
+            target = self._event_by_sequence(sequence)
+            if len(self._frozen_events.get(sequence, ())) < 1:
+                raise ValueError(f"event {sequence} is not frozen")
+            events.append(self._event(
+                f"release:{target.id}", LedgerEventType.RELEASE, target.amount,
+                target.destination_id, tag or str(sequence), target.task_id,
+                target.contract_id, target.evidence_key,
+                note.strip() or "dispute resolved",
+            ))
+            if target.kind == LedgerEventType.MINT:
+                self._minted_evidence.add(target.evidence_key)
+            self._frozen_events[sequence].clear()
+        return events
+
     def balance(self, member_id: str) -> Decimal:
         self._member(member_id)
         balance = ZERO
         for event in self.events:
             if event.kind not in {LedgerEventType.MINT, LedgerEventType.TRANSFER,
                                   LedgerEventType.RELEASE, LedgerEventType.REFUND,
-                                  LedgerEventType.SPLIT}:
+                                  LedgerEventType.SPLIT, LedgerEventType.FREEZE}:
                 continue
-            if event.destination_id == member_id:
-                balance += event.amount
-            if event.source_id == member_id:
-                balance -= event.amount
+            if event.kind == LedgerEventType.FREEZE:
+                # FREEZE pauses the holder's balance: subtract only. The
+                # frozen event's sequence is kept in destination_id.
+                if event.source_id == member_id:
+                    balance -= event.amount
+            elif event.kind == LedgerEventType.RELEASE:
+                # RELEASE restores the amount that FREEZE subtracted, as one
+                # atomic reversal. It does not change treasury: the MINT the
+                # FREEZE paused is still outstanding, so total supply is
+                # unchanged and the holder's balance returns to its pre-FREEZE
+                # value. The unfrozen event's sequence is in destination_id.
+                if event.source_id == member_id:
+                    balance += event.amount
+            else:
+                if event.destination_id == member_id:
+                    balance += event.amount
+                if event.source_id == member_id:
+                    balance -= event.amount
         return balance
 
     def balances(self) -> dict[str, Decimal]:
@@ -363,6 +429,11 @@ class TokenLedger:
         if self.minted_for_task(task.id) + value > task.mint_cap:
             raise ValueError("task mint cap exceeded")
 
+    def _event_by_sequence(self, sequence: int) -> LedgerEvent:
+        if not isinstance(sequence, int) or sequence < 1 or sequence > len(self.events):
+            raise ValueError(f"unknown event sequence: {sequence}")
+        return self.events[sequence - 1]
+
     def _event(self, event_id, kind, amount, source, destination, task_id, contract_id, key, note):
         if not event_id or event_id in self._event_ids:
             raise ValueError("event id must be new")
@@ -370,6 +441,9 @@ class TokenLedger:
                             source, destination, task_id, contract_id, key, note)
         self.events.append(event)
         self._event_ids.add(event_id)
+        if kind == LedgerEventType.FREEZE:
+            # A frozen mint's evidence may not mint again while frozen.
+            self._minted_evidence.discard(key)
         return event
 
     def _task(self, task_id: str) -> TokenTask:

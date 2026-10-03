@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from token_engine import (
     ContractStatus,
+    LedgerEventType,
     ProductionMode,
     TokenLedger,
     TokenProject,
@@ -150,6 +151,29 @@ class TokenEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid contract transition"):
             self.ledger.advance_contract(contract.id, ContractStatus.DELIVERED)
         self.assertEqual(contract.status, ContractStatus.DRAFT)
+
+    def test_freeze_pauses_balance_and_release_restores_it(self):
+        mint = self.ledger.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        self.assertEqual(self.ledger.balance("alice"), Decimal("40"))
+        frozen = self.ledger.freeze_events([mint.sequence], "争议冻结")
+        self.assertEqual(len(frozen), 1)
+        self.assertEqual(frozen[0].kind, LedgerEventType.FREEZE)
+        self.assertEqual(self.ledger.balance("alice"), Decimal("0"))
+        self.assertEqual(self.ledger.total_supply(), Decimal("40"))
+        released = self.ledger.release_events([mint.sequence], "争议已解决")
+        self.assertEqual(released[0].kind, LedgerEventType.RELEASE)
+        self.assertEqual(self.ledger.balance("alice"), Decimal("40"))
+
+    def test_freeze_is_idempotent_and_rejects_unsettled_targets(self):
+        mint = self.ledger.mint_direct("e1", "recommendation", "alice", "40", ["sha:a"])
+        transfer = self.ledger.transfer("e2", "alice", "bob", "5", "recommendation", ["sha:b"])
+        self.ledger.freeze_events([mint.sequence], "争议")
+        again = self.ledger.freeze_events([mint.sequence], "争议")
+        self.assertEqual(again, [])
+        with self.assertRaisesRegex(ValueError, "unknown event sequence"):
+            self.ledger.release_events([999])
+        with self.assertRaisesRegex(ValueError, "only MINT"):
+            self.ledger.freeze_events([transfer.sequence])
 
 
 if __name__ == "__main__":

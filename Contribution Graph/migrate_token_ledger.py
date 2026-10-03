@@ -27,6 +27,7 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
+from contribution_engine import ContributionType, contribution_score
 from contribution_store import ContributionStore
 from token_engine import TokenProject, TokenTask, ValueType
 from token_store import TokenStore
@@ -43,13 +44,13 @@ def migrate_project(source_db, target_db, project_id):
         raise ValueError(f"source database not found: {source_db}")
     if target_db.exists():
         raise ValueError(f"target database already exists: {target_db}; refusing to overwrite")
-    # Fail fast when the source is not readable in SQLite read-only mode.
+    # Open the legacy store through a read-only connection so migration can
+    # never modify the website's live data.
     probe = sqlite3.connect(f"file:{source_db.resolve()}?mode=ro", uri=True)
     probe.close()
-
-    store = ContributionStore(source_db)
+    store = ContributionStore(source_db, read_only=True)
     view = store.token_view(project_id)
-    project = store._project(project_id)
+    project = store.projects[project_id]
 
     ledger_project = TokenProject(
         view["project"]["id"], view["project"]["name"],
@@ -68,30 +69,40 @@ def migrate_project(source_db, target_db, project_id):
     contributions = {item.id: item for item in store.contributions.values()
                      if item.project_id == project_id}
     migrated = []
-    for contract in view["contracts"]:
-        legacy_id = contract["id"].removesuffix(":commission")
-        item = contributions[legacy_id]
+
+    def settle_contract(item, legacy_id):
+        contract = next(c for c in view["contracts"] if c["id"] == f"{legacy_id}:commission")
         token.create_commission(
             contract["id"], item.task_id, contract["principalId"], contract["contractorId"],
-            str(contract["contractPrice"]), str(contract["maximumMintValue"]),
+            str(Decimal(str(contract["contractPrice"]))),
+            str(Decimal(str(contract["maximumMintValue"]))),
         )
         for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "VERIFIED"):
             token.advance_contract(contract["id"], status)
         approvers = [member_id for member_id in project.member_ids
                      if member_id not in (contract["principalId"], contract["contractorId"])]
-        token.settle_commission(contract["id"], str(contract["verifiedMintValue"]),
+        token.settle_commission(contract["id"], str(Decimal(str(contract["verifiedMintValue"]))),
                                 [f"legacy:{legacy_id}"], approvers[:1])
-        migrated.append({"contributionId": legacy_id, "kind": "COMMISSION",
-                         "contractId": contract["id"]})
-    for event in view["events"]:
-        if event["kind"] != "MINT" or event["contractId"] is not None:
-            continue  # commission mints were already settled above
-        legacy_id = event["id"].removesuffix(":mint")
-        item = contributions[legacy_id]
-        token.mint_direct(event["id"], item.task_id, item.contributor_id,
-                          str(event["amount"]), [f"legacy:{legacy_id}"])
-        migrated.append({"contributionId": legacy_id, "kind": "DIRECT",
-                         "eventId": event["id"]})
+        return {"contributionId": legacy_id, "kind": "COMMISSION",
+                "contractId": contract["id"]}
+
+    # Process contributions in stored rowid order, exactly like the stage-1
+    # projection, so the migrated event order matches the token-view order.
+    for item in contributions.values():
+        if item.status not in ("VERIFIED", "RESOLVED"):
+            continue
+        if item.type == ContributionType.SUPPORT and item.helped_member_id is None:
+            continue
+        amount = contribution_score(item, project, store.members, store.tasks)
+        if amount <= 0:
+            continue
+        if item.type == ContributionType.SUPPORT:
+            migrated.append(settle_contract(item, item.id))
+        else:
+            token.mint_direct(f"{item.id}:mint", item.task_id, item.contributor_id,
+                              str(amount), [f"legacy:{item.id}"])
+            migrated.append({"contributionId": item.id, "kind": "DIRECT",
+                             "eventId": f"{item.id}:mint"})
 
     payload = token.ledger_payload()
     skipped = view["skipped"]

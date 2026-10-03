@@ -34,34 +34,28 @@ class TokenStore:
     def __init__(self, path, project: TokenProject | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.executescript(Path(__file__).with_name("token_schema.sql").read_text(encoding="utf-8"))
-            stored = conn.execute("SELECT id, name, treasury_id, member_ids FROM token_projects").fetchall()
         if project is not None:
-            if stored:
-                existing = {row[0] for row in stored}
-                if project.id in existing:
-                    raise ValueError(
-                        f"token project {project.id!r} already exists in {self.path}; "
-                        "open the store without a project argument to load it"
-                    )
-            self._ledger = TokenLedger(project)
-            with self._write() as conn:
-                conn.execute(
-                    "INSERT INTO token_projects (id, name, treasury_id, member_ids) VALUES (?, ?, ?, ?)",
-                    (project.id, project.name, project.treasury_id, json.dumps(list(project.member_ids))),
-                )
-        else:
-            if not stored:
+            if self.path.is_file():
                 raise ValueError(
-                    f"no token project stored in {self.path}; pass a TokenProject to create one"
+                    f"token ledger already exists in {self.path}; refusing to overwrite"
                 )
-            if len(stored) > 1:
-                raise ValueError("TokenStore supports exactly one token project per database file")
-            project_id, name, treasury_id, member_ids = stored[0]
-            self._ledger = TokenLedger(TokenProject(project_id, name, treasury_id, tuple(json.loads(member_ids))))
-            with self._connect() as conn:
-                self._replay(conn)
+            self._ledger = TokenLedger(project)
+            self._initializing = True
+            try:
+                with self._write() as conn:
+                    self._insert_project(conn, project)
+            finally:
+                del self._initializing
+        else:
+            if not self.path.is_file():
+                raise ValueError(
+                    f"no token ledger stored in {self.path}; pass a TokenProject to create one"
+                )
+            try:
+                with self._write() as conn:
+                    self._load_locked(conn)
+            except sqlite3.Error as error:
+                raise ValueError(f"token ledger storage error: {error}") from error
 
     @property
     def ledger(self) -> TokenLedger:
@@ -84,13 +78,18 @@ class TokenStore:
     def _write(self):
         """One BEGIN IMMEDIATE transaction per public mutation.
 
-        The in-memory ledger mutates in place, so on failure we rebuild it by
-        replaying the (unchanged) stored state instead of trying to roll back
-        individual objects.
+        Replay happens under the write lock, so concurrent mutations always
+        validate against the latest committed state (matching the legacy
+        store's _write/_load pattern). A failed mutation rolls the file back
+        and rebuilds memory from stored state; both always end consistent.
         """
         with self._connect() as conn:
+            conn.executescript(
+                Path(__file__).with_name("token_schema.sql").read_text(encoding="utf-8")
+            )
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                self._load_locked(conn)
                 yield conn
                 conn.commit()
             except Exception:
@@ -101,12 +100,31 @@ class TokenStore:
     def _reload(self, conn):
         project = self._ledger.project
         self._ledger = TokenLedger(project)
-        self._replay(conn)
+        self._load_locked(conn)
 
-    # ------------------------------------------------------------------ replay
+    def _load_locked(self, conn):
+        """Rebuild the in-memory ledger from stored definitions and events.
 
-    def _replay(self, conn):
-        """Rebuild the in-memory ledger from stored definitions and events."""
+        Must be called while holding the write lock (_write), never on a
+        read-only path.
+        """
+        stored = conn.execute(
+            "SELECT id, name, treasury_id, member_ids FROM token_projects"
+        ).fetchall()
+        if not stored:
+            # First write to a fresh ledger file: nothing to replay. Callers
+            # about to insert the initial project keep their in-memory ledger.
+            if getattr(self, "_initializing", False):
+                return
+            raise ValueError(
+                f"no token project stored in {self.path}; pass a TokenProject to create one"
+            )
+        if len(stored) > 1:
+            raise ValueError("TokenStore supports exactly one token project per database file")
+        project_id, name, treasury_id, member_ids = stored[0]
+        self._ledger = TokenLedger(
+            TokenProject(project_id, name, treasury_id, tuple(json.loads(member_ids)))
+        )
         for task_id, name, value_type, mint_cap, criteria in conn.execute(
             "SELECT id, name, value_type, mint_cap, acceptance_criteria FROM token_tasks "
             "WHERE project_id = ? ORDER BY rowid",
@@ -149,10 +167,18 @@ class TokenStore:
             )
             self._ledger.events.append(event)
             self._ledger._event_ids.add(event.id)
-        # Derived indexes must match what a live session would have built.
+        # Freeze tracking: an event is frozen iff its freeze:<id> record exists
+        # in the append-only log (self-contained and replay-safe).
+        self._ledger._frozen_events = {
+            target.sequence: {1}
+            for target in self._ledger.events
+            if target.kind == LedgerEventType.MINT
+            and f"freeze:{target.id}" in self._ledger._event_ids
+        }
         self._ledger._minted_evidence = {
             event.evidence_key for event in self._ledger.events
             if event.kind == LedgerEventType.MINT
+            and event.sequence not in self._ledger._frozen_events
         }
         self._ledger._settled_contracts = {
             contract.id for contract in self._ledger.contracts.values()
@@ -160,6 +186,14 @@ class TokenStore:
         }
 
     # ------------------------------------------------------------- persistence
+
+    @staticmethod
+    def _insert_project(conn, project: TokenProject):
+        conn.execute(
+            "INSERT INTO token_projects (id, name, treasury_id, member_ids) VALUES (?, ?, ?, ?)",
+            (project.id, project.name, project.treasury_id,
+             json.dumps(list(project.member_ids))),
+        )
 
     def _insert_task(self, conn, task: TokenTask):
         conn.execute(
@@ -260,6 +294,20 @@ class TokenStore:
             self._insert_events(conn, self._ledger.events[before:])
         return event
 
+    def freeze_events(self, sequences, reason: str = "", tag: str | None = None) -> list[LedgerEvent]:
+        with self._write() as conn:
+            before = len(self._ledger.events)
+            events = self._ledger.freeze_events(sequences, reason, tag)
+            self._insert_events(conn, self._ledger.events[before:])
+        return events
+
+    def release_events(self, sequences, note: str = "", tag: str | None = None) -> list[LedgerEvent]:
+        with self._write() as conn:
+            before = len(self._ledger.events)
+            events = self._ledger.release_events(sequences, note, tag)
+            self._insert_events(conn, self._ledger.events[before:])
+        return events
+
     # ---------------------------------------------------------- read delegates
 
     def balance(self, member_id) -> Decimal:
@@ -313,7 +361,7 @@ class TokenStore:
         }
 
     def ledger_payload(self) -> dict:
-        """JSON-ready snapshot of events, balances, and budgets for the API layer."""
+        """JSON-ready snapshot of events, balances, and totals for the API layer."""
         events = [
             {
                 "sequence": event.sequence,

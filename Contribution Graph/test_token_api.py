@@ -207,6 +207,111 @@ class TokenApiTests(unittest.TestCase):
         ledger = self.client.get("/api/token/ledger").json()
         self.assertEqual(ledger["totalSupply"], 40.0)
 
+    def test_adjust_mints_as_verification(self):
+        self.create_ledger()
+        response = self.client.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "bob", "decision": "ADJUST", "note": "",
+            "completion": "0.5",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["tokenMint"]["kind"], "DIRECT")
+        self.assertEqual(body["tokenMint"]["amount"], 20.0)
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertEqual(ledger["balances"]["alice"], 20.0)
+        self.assertEqual(ledger["totalSupply"], 20.0)
+
+    def test_dispute_freezes_and_resolve_releases_minted_tokens(self):
+        self.create_ledger()
+        self.client.post("/api/contributions/core/reviews",
+                         json={"reviewer_id": "bob", "decision": "CONFIRM"})
+        dispute = self.client.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "alice", "decision": "DISPUTE", "note": "recheck",
+        })
+        self.assertEqual(dispute.status_code, 200, dispute.text)
+        frozen = dispute.json()["tokenFrozen"]
+        self.assertEqual(frozen["kind"], "FREEZE")
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertEqual(ledger["balances"]["alice"], 0.0)
+        self.assertEqual(ledger["totalSupply"], 40.0)  # supply unchanged by FREEZE
+        resolve = self.client.post("/api/contributions/core/resolve", json={
+            "resolved_by": "bob", "resolution": "agreed", "completion": "1",
+        })
+        self.assertEqual(resolve.status_code, 200, resolve.text)
+        body = resolve.json()
+        self.assertEqual(body["tokenResolved"]["released"]["kind"], "RELEASE")
+        self.assertNotIn("correction", body["tokenResolved"])  # final == frozen
+        self.assertEqual(body["tokenResolved"]["finalAmount"], 40.0)
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertEqual(ledger["balances"]["alice"], 40.0)
+
+    def test_resolve_after_dispute_can_mint_with_changed_score(self):
+        self.create_ledger()
+        self.client.post("/api/contributions/core/reviews",
+                         json={"reviewer_id": "bob", "decision": "CONFIRM"})
+        self.client.post("/api/contributions/core/reviews",
+                         json={"reviewer_id": "alice", "decision": "DISPUTE", "note": "recheck"})
+        resolve = self.client.post("/api/contributions/core/resolve", json={
+            "resolved_by": "bob", "resolution": "lower value", "completion": "0.8",
+        })
+        self.assertEqual(resolve.status_code, 200, resolve.text)
+        body = resolve.json()
+        correction = body["tokenResolved"]["correction"]
+        self.assertEqual(correction["kind"], "REFUND")
+        self.assertEqual(correction["amount"], 8.0)
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertEqual(ledger["balances"]["alice"], 32.0)
+
+    def test_corrupt_token_db_never_fails_committed_legacy_review(self):
+        self.token_db.write_bytes(b"corrupted-not-sqlite")
+        response = self.client.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "bob", "decision": "CONFIRM", "note": "",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("tokenMint", response.json())
+        self.assertIn("skipped", response.json()["tokenMint"])
+        self.assertEqual(ContributionStore(self.legacy_db).contributions["core"].status.value,
+                         "VERIFIED")
+
+    def test_corrupt_token_db_dispute_and_resolve_still_work(self):
+        self.token_db.write_bytes(b"corrupted-not-sqlite")
+        dispute = self.client.post("/api/contributions/core/reviews", json={
+            "reviewer_id": "bob", "decision": "DISPUTE", "note": "recheck",
+        })
+        self.assertEqual(dispute.status_code, 200)
+        resolve = self.client.post("/api/contributions/core/resolve", json={
+            "resolved_by": "charlie", "resolution": "ok", "completion": "1",
+        })
+        self.assertEqual(resolve.status_code, 200)
+
+    def test_token_write_storage_errors_are_400_not_500(self):
+        self.create_ledger()
+        self.token_db.write_bytes(b"corrupted-not-sqlite")
+        response = self.client.post("/api/token/mint", json={
+            "event_id": "e1", "task_id": "recommendation", "recipient_id": "alice",
+            "amount": "10", "evidence_hashes": ["sha:a"],
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_freeze_and_release_over_http(self):
+        self.create_ledger()
+        self.client.post("/api/token/mint", json={
+            "event_id": "e1", "task_id": "recommendation", "recipient_id": "alice",
+            "amount": "40", "evidence_hashes": ["sha:a"],
+        })
+        import json as _json
+        from token_store import TokenStore
+        sequences = [e["sequence"] for e in
+                     TokenStore(self.token_db).ledger_payload()["events"]
+                     if e["kind"] == "MINT"]
+        # Exercised through the store layer used by the review hooks.
+        TokenStore(self.token_db).freeze_events(sequences, "争议")
+        ledger = self.client.get("/api/token/ledger").json()
+        self.assertEqual(ledger["balances"]["alice"], 0.0)
+        TokenStore(self.token_db).release_events(sequences, "解决")
+        self.assertEqual(self.client.get("/api/token/ledger").json()
+                         ["balances"]["alice"], 40.0)
+
 
 class MigrationTests(unittest.TestCase):
     def setUp(self):
@@ -250,6 +355,19 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(migrated["balances"], live["balances"])
         self.assertEqual(migrated["totalSupply"], live["totalSupply"])
         self.assertEqual(len(migrated["events"]), len(live["events"]))
+        # Event order must match the stage-1 projection exactly, not just
+        # totals and counts.
+        view = ContributionStore(self.legacy_db, read_only=True).token_view("fintech")
+        projected_ids = [event["id"] for event in view["events"]]
+        migrated_ids = [event["id"] for event in migrated["events"]]
+        self.assertEqual(migrated_ids, projected_ids)
+
+    def test_source_is_opened_read_only(self):
+        build_legacy(self.legacy_db)
+        before = self.legacy_db.read_bytes()
+        migrated_db = Path(self.tmp.name) / "migrated.sqlite3"
+        migrate_project(self.legacy_db, migrated_db, "fintech")
+        self.assertEqual(self.legacy_db.read_bytes(), before)
 
     def test_migration_refuses_to_overwrite(self):
         build_legacy(self.legacy_db)
