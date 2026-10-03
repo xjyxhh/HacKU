@@ -303,7 +303,8 @@ class ContributionStore:
             } for member_id in project.member_ids],
             "tasks": [
                 {"id": task_id, "name": self.tasks[task_id].name,
-                 "taskValue": float(self.tasks[task_id].task_value)}
+                 "taskValue": float(self.tasks[task_id].task_value),
+                 "description": self.tasks[task_id].description}
                 for task_id in project.task_ids
             ],
             "contributions": records,

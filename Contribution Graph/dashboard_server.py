@@ -94,6 +94,12 @@ def create_app(db_path=DEFAULT_DB):
         result = getattr(read(), method)(*args)
         return jsonable_encoder(asdict(result), custom_encoder={Decimal: str})
 
+    @app.get("/api/projects")
+    def projects(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        store = read()
+        return [{"id": project.id, "name": project.name} for project in store.projects.values()]
+
     @app.get("/api/dashboard")
     def dashboard(response: Response):
         response.headers["Cache-Control"] = "no-store"

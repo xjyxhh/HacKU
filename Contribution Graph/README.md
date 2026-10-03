@@ -29,7 +29,7 @@ python3 contribution_store.py --db workflow.sqlite3 record c4
 | David 的 Support 贡献发生争议 | 40 | 20 | 3 | 4 |
 | 争议解决，Support 最终价值为 7 | 40 | 20 | 3 | 11 |
 
-## C：打开 Dashboard 与帮助关系图
+## C：打开 Dashboard、录入贡献与关系图
 
 首次运行时，创建虚拟环境、安装依赖，并启动读取统一数据库的网站：
 
@@ -41,16 +41,19 @@ python3 -m venv .venv
 
 如果本地没有 `data.sqlite3`，先运行 `.venv/bin/python import_json.py data.json data.sqlite3`。`data.json` 是已合并数据的可移植快照；服务不会在默认路径上悄悄创建空数据库。
 
-浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。浏览器通过 `/api/dashboard` 请求 Python 服务，由服务读取 SQLite。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。页面点击“刷新数据”会重新读取该库。例如确认 Charlie 的待验证贡献：
+浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。页面可切换或创建项目、添加成员和任务、提交四类贡献；提交后立即从 SQLite 重新读取，显示待验证记录。项目、成员、任务和贡献 ID 需要在数据库中唯一。顶部导航串起总览、录入、关系图和贡献明细。关系图显示每条“成员 → 贡献 → 任务”关系，并以虚线标出受帮助成员；点击贡献可查看详情和评分输入字段。刷新保留当前项目、筛选和选中的贡献。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。例如确认 Charlie 的待验证贡献：
+
+页头“设置”可在中文和 English 之间切换界面语言，选择保存在当前浏览器中；项目名称、任务说明、贡献描述等录入内容保持原文。
 
 ```sh
 python3 contribution_store.py review c3 alice CONFIRM
 ```
 
-刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。现有页面仍为只读，但 FastAPI 已提供写入接口供其他界面调用：
+刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。页面录入使用以下 FastAPI 接口：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
+| GET | `/api/projects` | 列出可切换的项目 |
 | GET | `/api/dashboard` | 读取 `fintech` 项目的 Dashboard 数据 |
 | GET | `/api/projects/{project_id}/dashboard` | 读取指定项目数据 |
 | GET | `/api/contributions/{contribution_id}` | 读取贡献详情、证据和处理记录 |
