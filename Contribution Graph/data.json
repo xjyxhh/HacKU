@@ -1,0 +1,51 @@
+{
+  "projects": [
+    {
+      "id": "fintech",
+      "name": "FinTech Contribution Graph",
+      "member_ids": [
+        "alice",
+        "david"
+      ],
+      "task_ids": [
+        "deployment"
+      ]
+    }
+  ],
+  "members": [
+    {
+      "id": "alice",
+      "name": "Alice"
+    },
+    {
+      "id": "david",
+      "name": "David"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "deployment",
+      "project_id": "fintech",
+      "name": "Deployment",
+      "task_value": "20",
+      "description": "部署应用"
+    }
+  ],
+  "contributions": [
+    {
+      "id": "c1",
+      "project_id": "fintech",
+      "contributor_id": "david",
+      "task_id": "deployment",
+      "type": "SUPPORT",
+      "description": "帮助 Alice 排查部署问题",
+      "completion": "1",
+      "quality": "1",
+      "support_value": "8",
+      "status": "PENDING",
+      "helped_member_id": "alice",
+      "evidence_ids": [],
+      "resolution_note": null
+    }
+  ]
+}

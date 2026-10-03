@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contribution Graph · 项目看板</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">CG</span><span>Contribution Graph</span></div>
+      <div class="top-actions"><span class="data-label">FINTECH / 项目数据</span><button id="refresh" type="button">刷新数据 <span aria-hidden="true">↗</span></button></div>
+    </header>
+
+    <main>
+      <div id="error" class="error" role="alert" hidden></div>
+      <section class="intro" aria-labelledby="project-name">
+        <div><p class="eyebrow">团队贡献总览</p><h1 id="project-name">正在加载项目…</h1><p class="intro-copy">从任务到个人贡献，查看已验证的价值和成员之间的帮助关系。</p></div>
+        <p class="updated" id="updated" aria-live="polite">正在读取数据</p>
+      </section>
+
+      <section class="summary" aria-label="项目摘要">
+        <div><span>团队总分</span><strong id="team-score">—</strong><small>仅包含已验证和已解决的贡献</small></div>
+        <div><span>成员</span><strong id="member-count">—</strong><small>项目参与者</small></div>
+        <div><span>任务</span><strong id="task-count">—</strong><small>预设任务价值</small></div>
+        <div><span>贡献记录</span><strong id="contribution-count">—</strong><small id="pending-count">等待数据</small></div>
+      </section>
+
+      <div class="content-grid">
+        <section class="panel members-panel" aria-labelledby="members-title">
+          <div class="section-head"><div><p class="eyebrow">01 / 成员</p><h2 id="members-title">贡献占比</h2></div><span class="section-note">分数由评分引擎提供</span></div>
+          <div id="members" class="members"></div>
+          <p id="members-empty" class="empty" hidden>暂无成员。</p>
+        </section>
+        <section class="panel task-panel" aria-labelledby="tasks-title">
+          <div class="section-head"><div><p class="eyebrow">02 / 任务</p><h2 id="tasks-title">任务价值</h2></div></div>
+          <div id="tasks" class="tasks"></div>
+          <p id="tasks-empty" class="empty" hidden>暂无任务。</p>
+        </section>
+      </div>
+
+      <section class="panel graph-panel" aria-labelledby="graph-title">
+        <div class="section-head"><div><p class="eyebrow">03 / 协作网络</p><h2 id="graph-title">谁帮助了谁</h2></div><span class="section-note">关系包含待验证和争议中的贡献</span></div>
+        <div id="graph-content">
+          <svg id="graph" viewBox="0 0 760 300" role="img" aria-label="成员帮助关系图"></svg>
+          <div id="relationships" class="relationship-list"></div>
+        </div>
+        <p id="graph-empty" class="empty" hidden>暂无帮助关系。带有受帮助成员的贡献会显示在这里。</p>
+      </section>
+
+      <section class="panel contribution-panel" aria-labelledby="contributions-title">
+        <div class="section-head"><div><p class="eyebrow">04 / 贡献</p><h2 id="contributions-title">贡献明细</h2></div><label class="filter">状态 <select id="status-filter"><option value="ALL">全部</option><option value="PENDING">待验证</option><option value="VERIFIED">已验证</option><option value="DISPUTED">争议中</option><option value="RESOLVED">已解决</option></select></label></div>
+        <div class="table-wrap"><table><thead><tr><th>贡献者 / 内容</th><th>关联任务</th><th>类型</th><th>状态</th><th class="number">当前得分</th></tr></thead><tbody id="contributions"></tbody></table></div>
+        <p id="contributions-empty" class="empty" hidden>暂无符合条件的贡献。</p>
+      </section>
+    </main>
+    <footer>Contribution Graph <span>数据来源：同一项目 JSON 文件</span></footer>
+  </div>
+</body>
+</html>
