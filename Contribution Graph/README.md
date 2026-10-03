@@ -29,7 +29,7 @@ python3 contribution_store.py --db workflow.sqlite3 record c4
 | David 的 Support 贡献发生争议 | 40 | 20 | 3 | 4 |
 | 争议解决，Support 最终价值为 7 | 40 | 20 | 3 | 11 |
 
-## C：打开 Dashboard 与帮助关系图
+## C：打开 Dashboard、录入贡献与关系图
 
 首次运行时，创建虚拟环境、安装依赖，并启动读取统一数据库的网站：
 
@@ -41,16 +41,19 @@ python3 -m venv .venv
 
 如果本地没有 `data.sqlite3`，先运行 `.venv/bin/python import_json.py data.json data.sqlite3`。`data.json` 是已合并数据的可移植快照；服务不会在默认路径上悄悄创建空数据库。
 
-浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。浏览器通过 `/api/dashboard` 请求 Python 服务，由服务读取 SQLite。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。页面点击“刷新数据”会重新读取该库。例如确认 Charlie 的待验证贡献：
+浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。页面可切换或创建项目、添加成员和任务、提交四类贡献；提交后立即从 SQLite 重新读取，显示待验证记录。项目、成员、任务和贡献 ID 需要在数据库中唯一。顶部导航串起总览、录入、关系图和贡献明细。关系图显示每条“成员 → 贡献 → 任务”关系，并以虚线标出受帮助成员；点击贡献可查看详情和评分输入字段。刷新保留当前项目、筛选和选中的贡献。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。例如确认 Charlie 的待验证贡献：
+
+页头“设置”可在中文和 English 之间切换界面语言，选择保存在当前浏览器中；项目名称、任务说明、贡献描述等录入内容保持原文。
 
 ```sh
 python3 contribution_store.py review c3 alice CONFIRM
 ```
 
-刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。现有页面仍为只读，但 FastAPI 已提供写入接口供其他界面调用：
+刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。页面录入使用以下 FastAPI 接口：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
+| GET | `/api/projects` | 列出可切换的项目 |
 | GET | `/api/dashboard` | 读取 `fintech` 项目的 Dashboard 数据 |
 | GET | `/api/projects/{project_id}/dashboard` | 读取指定项目数据 |
 | GET | `/api/contributions/{contribution_id}` | 读取贡献详情、证据和处理记录 |
@@ -89,6 +92,34 @@ python3 import_json.py data.json data.sqlite3
 - 数据库操作集中在 `contribution_store.py`。换库时替换连接、SQL 占位符和事务实现，尽量保持评分引擎及 API 的输入输出不变。
 - 按项目、成员、项目成员、任务、贡献、证据、审核、争议的顺序复制数据；迁移前后比较记录数量、贡献状态和成员分数。审核或争议的状态更新及历史记录必须处于同一事务。
 - 当前界面和争议处理按 SQLite 插入顺序读取记录（`rowid`）。迁移历史记录时要保留这个顺序，并在 PostgreSQL 中设置明确的排序列。
+
+## B：贡献审核页面
+
+启动服务后打开 `http://127.0.0.1:8000/review.html`，或点击看板顶部的“贡献审核”。选择当前操作成员和贡献，即可添加证据、确认、预览并调整分数、提出争议、解决争议，以及查看历史记录。成员下拉框是演示身份选择，没有登录认证。
+
+- `PENDING`：其他成员可以确认或调整；项目成员可以填写原因提出争议。
+- `VERIFIED`：可以提出争议。
+- `DISPUTED`：其他成员填写结论并预览最终分数后解决。
+- `RESOLVED`：查看最终结果和处理记录。
+- `IMAGE`、`GITHUB_PR` 等证据保存文本或链接引用，没有文件上传。
+- 调整前先点击“预览分数”；分数实际变化后才能提交调整。确认使用原有提议分值。
+- 页面显示的当前分数、提议分值和调整预览均由后端评分引擎提供。新增 `POST /api/contributions/{contribution_id}/preview` 接口接受 `completion`、`support_value`、`quality`，只计算、不保存。
+- 写入后重新获取贡献详情和项目数据，并通知同源浏览器中已经打开的看板自动刷新。也可以手动点击“刷新数据”。
+
+在 `Contribution Graph/` 中启动读取统一数据库的服务（虚拟环境与依赖安装见上文）：
+
+```sh
+.venv/bin/python dashboard_server.py
+```
+
+如需单独演示，先生成一个不存在的 SQLite 文件，再让 B/C 使用同一份副本：
+
+```sh
+.venv/bin/python seed_dashboard.py output/b-demo.sqlite3
+.venv/bin/python dashboard_server.py --db output/b-demo.sqlite3
+```
+
+详细实现与验收步骤见仓库根目录的 `B-实现说明.md`。
 
 ## 手动操作全套流程
 

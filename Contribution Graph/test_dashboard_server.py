@@ -16,6 +16,7 @@ class DashboardApiTests(unittest.TestCase):
             self.assertEqual(client.get("/").status_code, 200)
             self.assertEqual(client.get("/docs").status_code, 200)
             self.assertEqual(client.post("/api/projects", json={"id": "fintech", "name": "Project"}).status_code, 201)
+            self.assertEqual(client.get("/api/projects").json(), [{"id": "fintech", "name": "Project"}])
             for member in ("alice", "bob"):
                 self.assertEqual(client.post("/api/projects/fintech/members",
                                              json={"id": member, "name": member}).status_code, 201)
@@ -49,6 +50,28 @@ class DashboardApiTests(unittest.TestCase):
             }).status_code, 200)
             self.assertEqual(client.get("/api/projects/fintech/dashboard").json()["members"][0]["totalScore"], 10)
             self.assertEqual(len(client.get("/api/contributions/c1").json()["disputes"]), 1)
+
+    def test_entry_data_persists_across_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data.sqlite3"
+            client = TestClient(create_app(path))
+            client.post("/api/projects", json={"id": "demo", "name": "Demo"})
+            for member in ("alice", "david"):
+                client.post("/api/projects/demo/members", json={"id": member, "name": member.title()})
+            client.post("/api/projects/demo/tasks", json={"id": "deploy", "name": "Deployment", "task_value": "20", "description": "Deploy app"})
+            response = client.post("/api/projects/demo/contributions", json={
+                "id": "new-help", "contributor_id": "david", "task_id": "deploy", "type": "SUPPORT",
+                "description": "Helped Alice deploy", "support_value": "8", "helped_member_id": "alice",
+            })
+            self.assertEqual(response.status_code, 201)
+            reopened = TestClient(create_app(path))
+            data = reopened.get("/api/projects/demo/dashboard").json()
+            self.assertEqual(data["tasks"][0]["description"], "Deploy app")
+            self.assertEqual(data["contributions"][0]["status"], "PENDING")
+            self.assertEqual(data["contributions"][0]["score"], 0)
+            detail = reopened.get("/api/contributions/new-help").json()
+            self.assertEqual(detail["contribution"]["support_value"], "8")
+            self.assertEqual(detail["contribution"]["helped_member_id"], "alice")
 
 
 if __name__ == "__main__":

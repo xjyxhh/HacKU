@@ -72,6 +72,12 @@ class ResolutionInput(BaseModel):
     quality: Decimal | None = None
 
 
+class ScorePreviewInput(BaseModel):
+    completion: Decimal | None = None
+    support_value: Decimal | None = None
+    quality: Decimal | None = None
+
+
 def create_app(db_path=DEFAULT_DB):
     app = FastAPI(title="Contribution Graph API")
     db_path = Path(db_path)
@@ -94,6 +100,12 @@ def create_app(db_path=DEFAULT_DB):
         result = getattr(read(), method)(*args)
         return jsonable_encoder(asdict(result), custom_encoder={Decimal: str})
 
+    @app.get("/api/projects")
+    def projects(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        store = read()
+        return [{"id": project.id, "name": project.name} for project in store.projects.values()]
+
     @app.get("/api/dashboard")
     def dashboard(response: Response):
         response.headers["Cache-Control"] = "no-store"
@@ -106,6 +118,10 @@ def create_app(db_path=DEFAULT_DB):
     @app.get("/api/contributions/{contribution_id}")
     def contribution(contribution_id: str):
         return read().contribution_data(contribution_id)
+
+    @app.post("/api/contributions/{contribution_id}/preview")
+    def preview_score(contribution_id: str, body: ScorePreviewInput):
+        return read().preview_score(contribution_id, body.completion, body.support_value, body.quality)
 
     @app.post("/api/projects", status_code=201)
     def create_project(body: ProjectInput):
