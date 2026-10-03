@@ -3,9 +3,10 @@
 import tempfile
 import unittest
 import json
+import sqlite3
+from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
 
 from contribution_engine import ContributionStatus, ContributionType
 from contribution_store import ContributionStore
@@ -14,7 +15,7 @@ from contribution_store import ContributionStore
 class ContributionStoreTests(unittest.TestCase):
     def test_create_submit_and_reload(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "nested" / "data.json"
+            path = Path(directory) / "nested" / "data.sqlite3"
             store = ContributionStore(path)
             store.create_project("fintech", "FinTech Contribution Graph")
             store.add_member("fintech", "alice", "Alice")
@@ -36,14 +37,13 @@ class ContributionStoreTests(unittest.TestCase):
             self.assertEqual(reloaded.contributions["c1"].status, ContributionStatus.PENDING)
             self.assertEqual(reloaded.project_scores("fintech")["david"].total_score, 0)
 
-    def test_invalid_submission_does_not_change_file(self):
+    def test_invalid_submission_does_not_change_database(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "data.json"
+            path = Path(directory) / "data.sqlite3"
             store = ContributionStore(path)
             store.create_project("p", "Project")
             store.add_member("p", "alice", "Alice")
             store.add_task("p", "task", "Task", "10")
-            original = path.read_bytes()
             with self.assertRaisesRegex(ValueError, "helped member"):
                 store.submit_contribution("p", "c1", "alice", "task", "SUPPORT", "Helped",
                                           support_value="2", helped_member_id="unknown")
@@ -51,12 +51,12 @@ class ContributionStoreTests(unittest.TestCase):
                 store.add_task("p", "bad", "Bad", "NaN")
             with self.assertRaisesRegex(ValueError, "new"):
                 store.add_member("p", "alice", "Duplicate")
-            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(ContributionStore(path).contributions, {})
             self.assertEqual(store.contributions, {})
 
     def test_review_dispute_resolution_and_dashboard(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "data.json"
+            path = Path(directory) / "data.sqlite3"
             store = ContributionStore(path)
             store.create_project("p", "Project")
             store.add_member("p", "alice", "Alice")
@@ -102,9 +102,9 @@ class ContributionStoreTests(unittest.TestCase):
             self.assertEqual(dashboard["relationships"][0]["score"], 5.0)
             json.dumps(dashboard)
 
-    def test_invalid_review_does_not_change_score_or_file(self):
+    def test_invalid_review_does_not_change_score_or_database(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "data.json"
+            path = Path(directory) / "data.sqlite3"
             store = ContributionStore(path)
             store.create_project("p", "Project")
             store.add_member("p", "alice", "Alice")
@@ -113,7 +113,6 @@ class ContributionStoreTests(unittest.TestCase):
             store.submit_contribution("p", "core", "alice", "task", "CORE", "Built feature")
             store.submit_contribution("p", "support", "alice", "task", "SUPPORT", "Helped",
                                       support_value="2")
-            original = path.read_bytes()
             with self.assertRaisesRegex(ValueError, "requires a score change"):
                 store.review_contribution("core", "bob", "ADJUST")
             with self.assertRaisesRegex(ValueError, "quality"):
@@ -126,36 +125,40 @@ class ContributionStoreTests(unittest.TestCase):
                 store.review_contribution("core", "alice", "CONFIRM")
             with self.assertRaisesRegex(ValueError, "reason"):
                 store.review_contribution("core", "alice", "DISPUTE")
-            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(ContributionStore(path).contributions["core"].status, ContributionStatus.PENDING)
             self.assertEqual(store.contributions["core"].status, ContributionStatus.PENDING)
             self.assertEqual(store.contributions["support"].status, ContributionStatus.PENDING)
 
-    def test_failed_save_restores_store_state(self):
+    def test_failed_transaction_restores_store_state(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "data.json"
+            path = Path(directory) / "data.sqlite3"
             store = ContributionStore(path)
             store.create_project("p", "Project")
-            original = path.read_bytes()
-            with patch("contribution_store.os.replace", side_effect=OSError("disk error")):
-                with self.assertRaisesRegex(OSError, "disk error"):
-                    store.add_member("p", "alice", "Alice")
-            self.assertEqual(path.read_bytes(), original)
+            with closing(sqlite3.connect(path)) as conn:
+                with conn:
+                    conn.execute("CREATE TRIGGER fail_membership BEFORE INSERT ON project_members "
+                                 "BEGIN SELECT RAISE(ABORT, 'write failed'); END")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "write failed"):
+                store.add_member("p", "alice", "Alice")
             self.assertEqual(store.projects["p"].member_ids, [])
             self.assertNotIn("alice", store.members)
+            self.assertNotIn("alice", ContributionStore(path).members)
+            with closing(sqlite3.connect(path)) as conn:
+                with conn:
+                    conn.execute("DROP TRIGGER fail_membership")
             store.add_member("p", "bob", "Bob")
             self.assertEqual(ContributionStore(path).projects["p"].member_ids, ["bob"])
 
-    def test_unknown_json_value_is_not_silently_saved(self):
+    def test_foreign_key_rejects_unknown_project(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "data.json"
+            path = Path(directory) / "data.sqlite3"
             store = ContributionStore(path)
             store.create_project("p", "Project")
-            original = path.read_bytes()
-            store.projects["p"].name = object()
-            with self.assertRaisesRegex(TypeError, "cannot serialize object"):
-                store.save()
-            self.assertEqual(path.read_bytes(), original)
-            self.assertEqual(store.projects["p"].name, "Project")
+            with store._connect() as conn:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute("INSERT INTO tasks (id, project_id, name, task_value) "
+                                 "VALUES ('task', 'missing', 'Task', '10')")
+            self.assertEqual(ContributionStore(path).tasks, {})
 
 
 if __name__ == "__main__":

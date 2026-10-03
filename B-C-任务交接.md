@@ -4,11 +4,11 @@
 
 ## 已有基础与共同约定
 
-- A 已提供项目、成员、任务、贡献的数据模型，JSON 本地保存，以及 `CORE`、`SUPPORT`、`REVIEW`、`COORDINATION` 四类贡献的评分规则。
+- A 已提供项目、成员、任务、贡献的数据模型，SQLite 本地保存，以及 `CORE`、`SUPPORT`、`REVIEW`、`COORDINATION` 四类贡献的评分规则。
 - 新贡献由 `ContributionStore.submit_contribution(...)` 创建，初始状态为 `PENDING`。`PENDING` 和 `DISPUTED` 得分为 0；`VERIFIED` 和 `RESOLVED` 按当前最终值计分。
 - `ContributionStore.contribution_data(contribution_id)` 提供单条贡献及证据、验证、争议记录，供 B 使用；`dashboard_data(project_id)` 提供项目、成员、任务、贡献及帮助关系，供 C 使用。
-- 当前已有 FastAPI 服务：C 的只读页面调用 `GET /api/dashboard`，B 可通过贡献详情、证据、验证与争议等 HTTP 接口操作同一份 JSON 数据文件。接口及启动方式见 `Contribution Graph/README.md`。不要在前端重写评分公式。
-- `Contribution Graph/data.json` 目前仅含 2 名成员、1 项任务和 1 条待验证贡献。完整的 4 人流程由 `demo_workflow.py` 生成；联调时应使用一份固定的 4 人演示数据文件，并约定其路径与重置方式。
+- 当前已有 FastAPI 服务：C 的只读页面调用 `GET /api/dashboard`，B 可通过贡献详情、证据、验证与争议等 HTTP 接口操作同一份 `data.sqlite3`。接口及启动方式见 `Contribution Graph/README.md`。不要在前端重写评分公式。
+- `Contribution Graph/data.sqlite3` 是统一数据源，包含 4 名成员、4 项任务和 6 条贡献；`data.json` 是它的可移植快照。网站统一从 `http://127.0.0.1:8000` 访问。
 
 ## B：证据、同伴验证与争议处理
 
@@ -46,7 +46,7 @@
 
 ## 联调顺序
 
-1. 确定固定演示数据文件、项目 ID `fintech`、调用方式及 B/C 共用的读写入口。
+1. 共用 `data.sqlite3`、项目 ID `fintech` 和端口 8000，确认 B/C 的读写入口。
 2. B 接通“查看贡献 → 添加证据 → 确认/调整 → 争议 → 解决”的操作链。
 3. C 接通 `dashboard_data("fintech")`，完成总览、明细和帮助关系图。
 4. 用 `demo_workflow.py` 的结果核对联动：全部待验证时四人均为 0；确认与调整后 Alice/Bob/Charlie/David 分别为 40/20/3/12；David 的 Support 被争议时为 4；最终价值改为 7 并解决后为 11。

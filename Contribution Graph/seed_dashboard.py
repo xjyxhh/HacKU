@@ -37,7 +37,7 @@ def seed(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("path", nargs="?", default=Path(__file__).with_name("demo.json"), type=Path)
+    parser.add_argument("path", type=Path, help="new, separate file for an isolated workflow example")
     args = parser.parse_args()
     data = seed(args.path)
     print(f"Created {args.path} with {len(data['members'])} members, "

@@ -56,13 +56,13 @@ def run(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", help="Keep demo data at this new JSON path")
+    parser.add_argument("--db", help="Keep demo data at this new SQLite path")
     args = parser.parse_args()
     if args.db:
         run(Path(args.db))
     else:
         with tempfile.TemporaryDirectory() as directory:
-            run(Path(directory) / "demo.json")
+            run(Path(directory) / "demo.sqlite3")
 
 
 if __name__ == "__main__":

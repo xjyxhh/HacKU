@@ -1,11 +1,12 @@
-"""Local persistence and command-line entry point for Contribution Graph."""
+"""SQLite persistence and command-line entry point for Contribution Graph."""
 
 import argparse
 import json
-import os
-import tempfile
+import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,83 +34,106 @@ def _json_default(value):
     raise TypeError(f"cannot serialize {type(value).__name__} to JSON")
 
 
+def _write(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self._load(conn)
+                self._conn = conn
+                result = method(self, *args, **kwargs)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._conn = None
+                self._load(conn)
+    return wrapped
+
+
 class ContributionStore:
     def __init__(self, path):
         self.path = Path(path)
-        self._load()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = None
+        with self._connect() as conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").fetchone():
+                conn.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
+            self._load(conn)
 
-    def _load(self):
-        data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
-        self.projects = {item["id"]: Project(**item) for item in data.get("projects", [])}
-        self.members = {item["id"]: Member(**item) for item in data.get("members", [])}
-        self.tasks = {
-            item["id"]: Task(**{**item, "task_value": Decimal(item["task_value"])})
-            for item in data.get("tasks", [])
-        }
-        self.contributions = {
-            item["id"]: Contribution(**{
-                **item,
-                "type": ContributionType(item["type"]),
-                "status": ContributionStatus(item["status"]),
-                "completion": Decimal(item["completion"]),
-                "quality": Decimal(item["quality"]),
-                "support_value": Decimal(item["support_value"]),
-            })
-            for item in data.get("contributions", [])
-        }
-        self.evidence = {item["id"]: Evidence(**{**item, "kind": EvidenceType(item["kind"])})
-                         for item in data.get("evidence", [])}
-        self.verifications = {
-            item["id"]: Verification(**{**item, "decision": VerificationDecision(item["decision"])})
-            for item in data.get("verifications", [])
-        }
-        self.disputes = {item["id"]: Dispute(**item) for item in data.get("disputes", [])}
-
-    def save(self):
-        data = {
-            "projects": [asdict(item) for item in self.projects.values()],
-            "members": [asdict(item) for item in self.members.values()],
-            "tasks": [asdict(item) for item in self.tasks.values()],
-            "contributions": [asdict(item) for item in self.contributions.values()],
-            "evidence": [asdict(item) for item in self.evidence.values()],
-            "verifications": [asdict(item) for item in self.verifications.values()],
-            "disputes": [asdict(item) for item in self.disputes.values()],
-        }
-        temp_path = None
+    @contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as file:
-                temp_path = file.name
-                json.dump(data, file, ensure_ascii=False, indent=2, default=_json_default)
-                file.write("\n")
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(temp_path, self.path)
-        except Exception:
-            self._load()
-            raise
+            yield conn
         finally:
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
+            conn.close()
 
+    def _load(self, conn):
+        # ponytail: Load the small local dataset as objects; query per project if it grows.
+        self.projects = {id: Project(id, name) for id, name in conn.execute("SELECT id, name FROM projects ORDER BY rowid")}
+        self.members = {id: Member(id, name) for id, name in conn.execute("SELECT id, name FROM members ORDER BY rowid")}
+        for project_id, member_id in conn.execute("SELECT project_id, member_id FROM project_members ORDER BY rowid"):
+            self.projects[project_id].member_ids.append(member_id)
+        self.tasks = {}
+        for id, project_id, name, value, description in conn.execute(
+            "SELECT id, project_id, name, task_value, description FROM tasks ORDER BY rowid"
+        ):
+            self.tasks[id] = Task(id, project_id, name, Decimal(value), description)
+            self.projects[project_id].task_ids.append(id)
+        self.contributions = {}
+        for row in conn.execute("SELECT id, project_id, contributor_id, task_id, type, description, "
+                                "completion, quality, support_value, status, helped_member_id, resolution_note "
+                                "FROM contributions ORDER BY rowid"):
+            id, project_id, contributor_id, task_id, kind, description, completion, quality, support_value, status, helped_member_id, resolution_note = row
+            self.contributions[id] = Contribution(
+                id, project_id, contributor_id, task_id, ContributionType(kind), description,
+                Decimal(completion), Decimal(quality), Decimal(support_value),
+                ContributionStatus(status), helped_member_id, resolution_note=resolution_note,
+            )
+        self.evidence = {}
+        for id, contribution_id, submitted_by, kind, reference in conn.execute(
+            "SELECT id, contribution_id, submitted_by, kind, reference FROM evidence ORDER BY rowid"
+        ):
+            self.evidence[id] = Evidence(id, contribution_id, submitted_by, EvidenceType(kind), reference)
+            self.contributions[contribution_id].evidence_ids.append(id)
+        self.verifications = {
+            id: Verification(id, contribution_id, reviewer_id, VerificationDecision(decision), note)
+            for id, contribution_id, reviewer_id, decision, note in conn.execute(
+                "SELECT id, contribution_id, reviewer_id, decision, note FROM verifications ORDER BY rowid"
+            )
+        }
+        self.disputes = {
+            id: Dispute(id, contribution_id, raised_by, reason, resolution, resolved_by)
+            for id, contribution_id, raised_by, reason, resolution, resolved_by in conn.execute(
+                "SELECT id, contribution_id, raised_by, reason, resolution, resolved_by FROM disputes ORDER BY rowid"
+            )
+        }
+
+    @_write
     def create_project(self, project_id, name):
         if not project_id or not name.strip() or project_id in self.projects:
             raise ValueError("project id must be new and name must be nonempty")
         project = Project(project_id, name)
-        self.projects[project_id] = project
-        self.save()
+        self._conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (project_id, name))
         return project
 
+    @_write
     def add_member(self, project_id, member_id, name):
         project = self._project(project_id)
         if not member_id or not name.strip() or member_id in self.members:
             raise ValueError("member id must be new and name must be nonempty")
         member = Member(member_id, name)
-        self.members[member_id] = member
-        project.member_ids.append(member_id)
-        self.save()
+        self._conn.execute("INSERT INTO members (id, name) VALUES (?, ?)", (member_id, name))
+        self._conn.execute("INSERT INTO project_members (project_id, member_id) VALUES (?, ?)",
+                           (project.id, member_id))
         return member
 
+    @_write
     def add_task(self, project_id, task_id, name, task_value, description=""):
         project = self._project(project_id)
         if not task_id or not name.strip() or task_id in self.tasks:
@@ -118,11 +142,11 @@ class ContributionStore:
         if not value.is_finite() or value < 0:
             raise ValueError("task_value must be a nonnegative finite number")
         task = Task(task_id, project_id, name, value, description)
-        self.tasks[task_id] = task
-        project.task_ids.append(task_id)
-        self.save()
+        self._conn.execute("INSERT INTO tasks (id, project_id, name, task_value, description) VALUES (?, ?, ?, ?, ?)",
+                           (task_id, project.id, name, str(value), description))
         return task
 
+    @_write
     def submit_contribution(
         self, project_id, contribution_id, contributor_id, task_id, kind, description,
         completion="1", support_value="0", helped_member_id=None,
@@ -138,8 +162,14 @@ class ContributionStore:
             helped_member_id=helped_member_id,
         )
         validate_contribution(contribution, project, self.members, self.tasks)
-        self.contributions[contribution_id] = contribution
-        self.save()
+        self._conn.execute(
+            "INSERT INTO contributions (id, project_id, contributor_id, task_id, type, description, "
+            "completion, quality, support_value, status, helped_member_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (contribution.id, project_id, contributor_id, task_id, contribution.type.value, description,
+             str(contribution.completion), str(contribution.quality), str(contribution.support_value),
+             contribution.status.value, helped_member_id),
+        )
         return contribution
 
     def project_scores(self, project_id):
@@ -147,17 +177,19 @@ class ContributionStore:
         contributions = [item for item in self.contributions.values() if item.project_id == project_id]
         return score_members(project, self.members, self.tasks, contributions)
 
+    @_write
     def add_evidence(self, contribution_id, submitted_by, kind, reference):
         contribution = self._contribution(contribution_id)
         self._member(contribution.project_id, submitted_by)
         if not reference.strip():
             raise ValueError("evidence reference must be nonempty")
         evidence = Evidence(uuid4().hex, contribution_id, submitted_by, EvidenceType(kind), reference)
-        self.evidence[evidence.id] = evidence
-        contribution.evidence_ids.append(evidence.id)
-        self.save()
+        self._conn.execute("INSERT INTO evidence (id, contribution_id, submitted_by, kind, reference) "
+                           "VALUES (?, ?, ?, ?, ?)",
+                           (evidence.id, contribution_id, submitted_by, evidence.kind.value, reference))
         return evidence
 
+    @_write
     def review_contribution(
         self, contribution_id, reviewer_id, decision, note="", completion=None,
         support_value=None, quality=None,
@@ -189,14 +221,20 @@ class ContributionStore:
                 ):
                     raise ValueError("ADJUST requires a score change")
         verification = Verification(uuid4().hex, contribution_id, reviewer_id, decision, note)
-        self.contributions[contribution_id] = updated
-        self.verifications[verification.id] = verification
+        self._conn.execute("UPDATE contributions SET status = ?, completion = ?, quality = ?, support_value = ? "
+                           "WHERE id = ?",
+                           (updated.status.value, str(updated.completion), str(updated.quality),
+                            str(updated.support_value), contribution_id))
+        self._conn.execute("INSERT INTO verifications (id, contribution_id, reviewer_id, decision, note) "
+                           "VALUES (?, ?, ?, ?, ?)",
+                           (verification.id, contribution_id, reviewer_id, decision.value, note))
         if decision == VerificationDecision.DISPUTE:
             dispute = Dispute(uuid4().hex, contribution_id, reviewer_id, note)
-            self.disputes[dispute.id] = dispute
-        self.save()
+            self._conn.execute("INSERT INTO disputes (id, contribution_id, raised_by, reason) VALUES (?, ?, ?, ?)",
+                               (dispute.id, contribution_id, reviewer_id, note))
         return updated
 
+    @_write
     def resolve_dispute(
         self, contribution_id, resolved_by, resolution, completion=None,
         support_value=None, quality=None,
@@ -218,10 +256,12 @@ class ContributionStore:
         updated = replace(contribution, status=ContributionStatus.RESOLVED,
                           resolution_note=resolution, **changes)
         validate_contribution(updated, project, self.members, self.tasks)
-        self.contributions[contribution_id] = updated
-        dispute.resolution = resolution
-        dispute.resolved_by = resolved_by
-        self.save()
+        self._conn.execute("UPDATE contributions SET status = ?, completion = ?, quality = ?, "
+                           "support_value = ?, resolution_note = ? WHERE id = ?",
+                           (updated.status.value, str(updated.completion), str(updated.quality),
+                            str(updated.support_value), resolution, contribution_id))
+        self._conn.execute("UPDATE disputes SET resolution = ?, resolved_by = ? WHERE id = ?",
+                           (resolution, resolved_by, dispute.id))
         return updated
 
     def dashboard_data(self, project_id):
@@ -315,7 +355,7 @@ class ContributionStore:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", default=str(Path(__file__).with_name("data.json")), help="JSON data file")
+    parser.add_argument("--db", default=str(Path(__file__).with_name("data.sqlite3")), help="SQLite database file")
     commands = parser.add_subparsers(dest="command", required=True)
     project = commands.add_parser("create-project")
     project.add_argument("id")

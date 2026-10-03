@@ -12,7 +12,7 @@ from dashboard_server import create_app
 class DashboardApiTests(unittest.TestCase):
     def test_dashboard_and_review_flow(self):
         with tempfile.TemporaryDirectory() as directory:
-            client = TestClient(create_app(Path(directory) / "data.json"))
+            client = TestClient(create_app(Path(directory) / "data.sqlite3"))
             self.assertEqual(client.get("/").status_code, 200)
             self.assertEqual(client.get("/docs").status_code, 200)
             self.assertEqual(client.post("/api/projects", json={"id": "fintech", "name": "Project"}).status_code, 201)

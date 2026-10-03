@@ -1,11 +1,10 @@
 """FastAPI service for the dashboard and contribution workflow."""
 
 import argparse
-import json
+import sqlite3
 from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from threading import Lock
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -19,7 +18,7 @@ from contribution_store import ContributionStore
 
 
 ROOT = Path(__file__).with_name("dashboard")
-DEFAULT_DB = Path(__file__).with_name("demo.json")
+DEFAULT_DB = Path(__file__).with_name("data.sqlite3")
 
 
 class ProjectInput(BaseModel):
@@ -76,7 +75,6 @@ class ResolutionInput(BaseModel):
 def create_app(db_path=DEFAULT_DB):
     app = FastAPI(title="Contribution Graph API")
     db_path = Path(db_path)
-    write_lock = Lock()
 
     @app.exception_handler(ValueError)
     @app.exception_handler(InvalidOperation)
@@ -84,7 +82,7 @@ def create_app(db_path=DEFAULT_DB):
         status = 404 if str(error).startswith("unknown ") else 400
         return JSONResponse(status_code=status, content={"detail": str(error), "error": str(error)})
 
-    @app.exception_handler(json.JSONDecodeError)
+    @app.exception_handler(sqlite3.Error)
     @app.exception_handler(OSError)
     async def storage_error(_request: Request, error: Exception):
         return JSONResponse(status_code=500, content={"detail": str(error), "error": str(error)})
@@ -93,9 +91,7 @@ def create_app(db_path=DEFAULT_DB):
         return ContributionStore(db_path)
 
     def write(method, *args):
-        # ponytail: One process lock fits the local demo; use DB transactions for multiple workers.
-        with write_lock:
-            result = getattr(read(), method)(*args)
+        result = getattr(read(), method)(*args)
         return jsonable_encoder(asdict(result), custom_encoder={Decimal: str})
 
     @app.get("/api/dashboard")
@@ -155,4 +151,7 @@ if __name__ == "__main__":
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+    if args.db == DEFAULT_DB and not args.db.is_file():
+        parser.error(f"database not found: {args.db}; import data.json with import_json.py first")
+    print(f"SQLite database: {args.db.resolve()}", flush=True)
     uvicorn.run(create_app(args.db), host="127.0.0.1", port=args.port)

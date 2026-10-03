@@ -1,5 +1,7 @@
 .DS_Store
 __pycache__/
+.venv/
 *.py[cod]
+Contribution Graph/*.sqlite3*
 ~$*
 Contribution Graph.zip

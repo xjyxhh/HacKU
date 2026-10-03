@@ -1,23 +1,23 @@
 # Contribution Graph：完整数据流程
 
-本文件夹包含本地 JSON 数据保存、贡献评分、验证与争议处理，以及供 Dashboard / Graph 使用的数据输出。命令行数据工具只需 Python 3；网页服务使用 FastAPI。数据工具不指定 `--db` 时使用本文件夹的 `data.json`，网页服务默认使用 `demo.json`。以下命令均在本文件夹中运行：
+本文件夹包含本地 SQLite 数据保存、贡献评分、验证与争议处理，以及 Dashboard / Graph 网站。网站和命令行默认共用 `data.sqlite3`，统一从 `http://127.0.0.1:8000` 访问。以下命令均在本文件夹中运行：
 
 ```sh
 cd 'Contribution Graph'
 ```
 
-## 一键运行完整演示
+## 一键运行独立流程示例
 
 ```sh
 python3 demo_workflow.py
 ```
 
-演示使用 4 位成员、4 项任务和 5 条贡献，依次完成提交、添加证据、确认、调整、争议、解决争议和刷新 Dashboard。默认使用临时数据文件；若想保留结果，使用一个尚不存在的数据文件：
+此命令在临时文件中验证提交、证据、审核、争议与计分流程，不会修改网站使用的数据库。若要保留示例结果，指定一个新文件：
 
 ```sh
-python3 demo_workflow.py --db demo.json
-python3 contribution_store.py --db demo.json dashboard fintech
-python3 contribution_store.py --db demo.json record c4
+python3 demo_workflow.py --db workflow.sqlite3
+python3 contribution_store.py --db workflow.sqlite3 dashboard fintech
+python3 contribution_store.py --db workflow.sqlite3 record c4
 ```
 
 演示中的成员分数变化如下：
@@ -31,23 +31,23 @@ python3 contribution_store.py --db demo.json record c4
 
 ## C：打开 Dashboard 与帮助关系图
 
-首次运行时，在本文件夹生成固定的四人演示数据，并启动本地只读页面：
+首次运行时，创建虚拟环境、安装依赖，并启动读取统一数据库的网站：
 
 ```sh
-python3 -m pip install -r requirements.txt
-python3 seed_dashboard.py
-python3 dashboard_server.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python dashboard_server.py
 ```
 
-浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。页面显示项目总览、任务价值、成员总分与四类明细、贡献占比、帮助关系图和贡献状态。演示文件 `demo.json` 包含 4 名成员、4 项任务、5 条贡献，以及 `PENDING`、`VERIFIED`、`DISPUTED`、`RESOLVED` 四种状态。`seed_dashboard.py` 不会覆盖已有文件；需要重置演示数据时，先将旧文件移走或删除，再运行脚本。
+如果本地没有 `data.sqlite3`，先运行 `.venv/bin/python import_json.py data.json data.sqlite3`。`data.json` 是已合并数据的可移植快照；服务不会在默认路径上悄悄创建空数据库。
 
-页面每次点击“刷新数据”都会重新读取同一个 JSON 文件。如果 B 用命令行或自己的界面修改贡献，请确保也使用 `--db demo.json`；例如确认 Charlie 的待验证贡献：
+浏览器打开 `http://127.0.0.1:8000`，API 文档在 `http://127.0.0.1:8000/docs`。浏览器通过 `/api/dashboard` 请求 Python 服务，由服务读取 SQLite。合并后的项目含 4 名成员、4 项任务和 6 条贡献；原有两条同名 `c1` 贡献均保留，其中 Alice 的贡献编号为 `merged-c1`。页面点击“刷新数据”会重新读取该库。例如确认 Charlie 的待验证贡献：
 
 ```sh
-python3 contribution_store.py --db demo.json review c3 alice CONFIRM
+python3 contribution_store.py review c3 alice CONFIRM
 ```
 
-刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。若 B/C 使用其他数据文件，可用 `python3 dashboard_server.py --db /path/to/shared.json` 启动页面。现有页面仍为只读，但 FastAPI 已提供写入接口供 B 的界面调用：
+刷新页面后，Charlie 的审查得分变为 3，团队总分从 67 变为 70。现有页面仍为只读，但 FastAPI 已提供写入接口供其他界面调用：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -70,30 +70,48 @@ curl -X POST http://127.0.0.1:8000/api/contributions/c3/reviews \
   -d '{"reviewer_id":"alice","decision":"CONFIRM"}'
 ```
 
-服务默认仅监听本机。当前接口使用请求中的成员 ID，尚无登录身份验证；若要开放给外部用户，需先加入认证，并将 JSON 存储改为支持多进程事务的数据库。
+服务默认仅监听本机。当前接口使用请求中的成员 ID，尚无登录身份验证；若要开放给外部用户，需先加入认证，并将 SQLite 存储改为 PostgreSQL 等服务数据库。
+
+## 数据快照与备份
+
+`data.json` 保存合并后的完整项目快照。新环境只需导入一次：
+
+```sh
+python3 import_json.py data.json data.sqlite3
+```
+
+导入工具拒绝覆盖已有数据库。合并前的两份 SQLite 原库保存在 `data.before-merge-*.sqlite3` 和 `demo.before-merge-*.sqlite3`；SQLite 文件已加入 `.gitignore`。日常修改以 `data.sqlite3` 为准，提交更改前运行 `python3 export_json.py` 更新可移植快照。
+
+## 将来迁移到 PostgreSQL 时
+
+- 保持 `schema.sql` 中的项目、成员、项目成员、任务、贡献、证据、审核和争议关系；不要把关联 ID 存回数组。数据库约束和应用校验都要保留。
+- 小数字段目前以 SQLite `TEXT` 保存，读取后转为 Python `Decimal` 计算。迁移时逐项校验，再写入 PostgreSQL `NUMERIC`；不要经过浮点数转换。
+- 数据库操作集中在 `contribution_store.py`。换库时替换连接、SQL 占位符和事务实现，尽量保持评分引擎及 API 的输入输出不变。
+- 按项目、成员、项目成员、任务、贡献、证据、审核、争议的顺序复制数据；迁移前后比较记录数量、贡献状态和成员分数。审核或争议的状态更新及历史记录必须处于同一事务。
+- 当前界面和争议处理按 SQLite 插入顺序读取记录（`rowid`）。迁移历史记录时要保留这个顺序，并在 PostgreSQL 中设置明确的排序列。
 
 ## 手动操作全套流程
 
-每条命令都使用同一个 `--db walkthrough.json`。若文件已含同名 ID，请换一个文件名或 ID。
+每条命令都使用同一个 `--db walkthrough.sqlite3`。若文件已含同名 ID，请换一个文件名或 ID。
 
 ### 1. 创建项目、成员和预设任务价值
 
 ```sh
-python3 contribution_store.py --db walkthrough.json create-project fintech 'FinTech Contribution Graph'
-python3 contribution_store.py --db walkthrough.json add-member fintech alice Alice
-python3 contribution_store.py --db walkthrough.json add-member fintech bob Bob
-python3 contribution_store.py --db walkthrough.json add-member fintech david David
-python3 contribution_store.py --db walkthrough.json add-task fintech recommendation 'Recommendation Engine' 40
-python3 contribution_store.py --db walkthrough.json add-task fintech deployment Deployment 20
+python3 contribution_store.py --db walkthrough.sqlite3 create-project fintech 'FinTech Contribution Graph'
+python3 contribution_store.py --db walkthrough.sqlite3 add-member fintech alice Alice
+python3 contribution_store.py --db walkthrough.sqlite3 add-member fintech bob Bob
+python3 contribution_store.py --db walkthrough.sqlite3 add-member fintech david David
+python3 contribution_store.py --db walkthrough.sqlite3 add-task fintech recommendation 'Recommendation Engine' 40
+python3 contribution_store.py --db walkthrough.sqlite3 add-task fintech deployment Deployment 20
 ```
 
 ### 2. 提交贡献并附上证据
 
 ```sh
-python3 contribution_store.py --db walkthrough.json submit fintech c1 alice recommendation CORE '实现推荐逻辑'
-python3 contribution_store.py --db walkthrough.json submit fintech c2 david deployment SUPPORT '帮助 Alice 排查部署问题' --support-value 8 --helped-member alice
-python3 contribution_store.py --db walkthrough.json add-evidence c2 david NOTE '共同排查部署问题的记录'
-python3 contribution_store.py --db walkthrough.json record c2
+python3 contribution_store.py --db walkthrough.sqlite3 submit fintech c1 alice recommendation CORE '实现推荐逻辑'
+python3 contribution_store.py --db walkthrough.sqlite3 submit fintech c2 david deployment SUPPORT '帮助 Alice 排查部署问题' --support-value 8 --helped-member alice
+python3 contribution_store.py --db walkthrough.sqlite3 add-evidence c2 david NOTE '共同排查部署问题的记录'
+python3 contribution_store.py --db walkthrough.sqlite3 record c2
 ```
 
 新贡献始终为 `PENDING`，此时 `scores fintech` 显示得分为 0。`submit` 还支持 `REVIEW` 和 `COORDINATION`；Core 可传 `--completion 0.8`，其余类型可传 `--support-value 8`。证据类型可选 `NOTE`、`URL`、`IMAGE`、`GITHUB_PR`，`reference` 保存说明或链接。
@@ -101,13 +119,13 @@ python3 contribution_store.py --db walkthrough.json record c2
 ### 3. 验证、调整、争议和解决
 
 ```sh
-python3 contribution_store.py --db walkthrough.json review c1 bob ADJUST --completion 0.8 --note '确认完成度为 80%'
-python3 contribution_store.py --db walkthrough.json review c2 alice CONFIRM
-python3 contribution_store.py --db walkthrough.json scores fintech
-python3 contribution_store.py --db walkthrough.json review c2 alice DISPUTE --note '需要重新确认支持价值'
-python3 contribution_store.py --db walkthrough.json scores fintech
-python3 contribution_store.py --db walkthrough.json resolve c2 alice '双方确认最终为 7 分' --support-value 7
-python3 contribution_store.py --db walkthrough.json record c2
+python3 contribution_store.py --db walkthrough.sqlite3 review c1 bob ADJUST --completion 0.8 --note '确认完成度为 80%'
+python3 contribution_store.py --db walkthrough.sqlite3 review c2 alice CONFIRM
+python3 contribution_store.py --db walkthrough.sqlite3 scores fintech
+python3 contribution_store.py --db walkthrough.sqlite3 review c2 alice DISPUTE --note '需要重新确认支持价值'
+python3 contribution_store.py --db walkthrough.sqlite3 scores fintech
+python3 contribution_store.py --db walkthrough.sqlite3 resolve c2 alice '双方确认最终为 7 分' --support-value 7
+python3 contribution_store.py --db walkthrough.sqlite3 record c2
 ```
 
 `CONFIRM` 和 `ADJUST` 需由其他成员操作，并将待验证贡献改为 `VERIFIED`；`ADJUST` 必须提供 `--completion`、`--support-value` 或 `--quality` 中至少一项，且调整后分数必须实际变化。`DISPUTE` 要求 `--note`，会将贡献改为 `DISPUTED` 并暂停计分。`resolve` 也需由其他成员操作，将其改为 `RESOLVED`，保存最终分值与解决说明。每次读取分数都会根据当前状态重新计算。
@@ -115,10 +133,10 @@ python3 contribution_store.py --db walkthrough.json record c2
 ### 4. 提供给 C 的 Dashboard / Graph 数据
 
 ```sh
-python3 contribution_store.py --db walkthrough.json dashboard fintech
+python3 contribution_store.py --db walkthrough.sqlite3 dashboard fintech
 ```
 
-输出为 JSON，包含 `project`、`members`、`tasks`、`contributions` 和 `relationships`。成员包含 `totalScore`、`contributionShare` 和四类 `breakdown`；关系中包含贡献者、受帮助成员、任务、类型、状态和当前得分。`PENDING` 与 `DISPUTED` 的当前得分为 0。C 可直接调用 `ContributionStore("walkthrough.json").dashboard_data("fintech")` 获取相同结构，无需重复计算分数。
+输出为 JSON，包含 `project`、`members`、`tasks`、`contributions` 和 `relationships`。成员包含 `totalScore`、`contributionShare` 和四类 `breakdown`；关系中包含贡献者、受帮助成员、任务、类型、状态和当前得分。`PENDING` 与 `DISPUTED` 的当前得分为 0。C 可直接调用 `ContributionStore("walkthrough.sqlite3").dashboard_data("fintech")` 获取相同结构，无需重复计算分数。
 
 ## 检查
 
@@ -129,5 +147,5 @@ python3 -m unittest discover -s . -p 'test_*.py'
 ## 修改代码时
 
 - `contribution_engine.py` 定义数据模型、输入校验和评分规则；修改评分公式或贡献字段时先改这里。
-- `contribution_store.py` 负责 JSON 读写、验证与争议流程，以及 Dashboard / Graph 输出；新增持久化字段时同步检查 `_load()` 和对应输出。
+- `schema.sql` 定义表、外键和索引；`contribution_store.py` 负责 SQLite 事务、验证与争议流程，以及 Dashboard / Graph 输出；新增持久化字段时同步检查 schema、`_load()` 和对应输出。
 - `demo_workflow.py` 演示完整流程；修改状态流转或输出格式后运行它，并运行上面的测试。
