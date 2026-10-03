@@ -4,7 +4,7 @@ const decisionNames = { CONFIRM: "确认", ADJUST: "调整", DISPUTE: "提出争
 const $ = (id) => document.getElementById(id);
 const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const points = (value) => new Intl.NumberFormat(I18n.language === "en" ? "en-US" : "zh-CN", { maximumFractionDigits: 2 }).format(value ?? 0);
-const state = { dashboard: null, detail: null, selectedId: null, busy: false, preview: null };
+const state = { dashboard: null, detail: null, selectedId: null, busy: false, preview: null, role: null };
 
 async function request(path, body) {
   let key = sessionStorage.getItem("tokenAdminKey") || "";
@@ -40,9 +40,9 @@ function visibleContributions() {
 
 function renderProject() {
   const data = state.dashboard;
-  const previousActor = $("actor").value;
   $("actor").innerHTML = data.members.map((member) => `<option value="${safe(member.id)}">${safe(member.name)}</option>`).join("");
-  if (data.members.some((member) => member.id === previousActor)) $("actor").value = previousActor;
+  $("actor").value = Auth.member?.memberId ?? "";
+  $("actor").disabled = true;
   $("project-name").textContent = data.project.name;
   $("team-score").textContent = points(data.members.reduce((sum, member) => sum + member.totalScore, 0));
   $("pending-count").textContent = data.contributions.filter((item) => item.status === "PENDING").length;
@@ -123,26 +123,28 @@ function updateControls() {
   const item = state.detail?.contribution;
   const hasActor = !!$("actor").value;
   const self = item?.contributor_id === $("actor").value;
+  const canVerify = ["OWNER", "VERIFIER"].includes(state.role);
+  const canAddEvidence = ["OWNER", "MEMBER", "VERIFIER"].includes(state.role);
   const pending = item?.status === "PENDING";
   const disputed = item?.status === "DISPUTED";
-  const editable = !!item && hasActor && !self && (pending || disputed);
+  const editable = !!item && hasActor && canVerify && !self && (pending || disputed);
   const locked = state.busy || !item || !hasActor;
   $("refresh").disabled = state.busy;
   $("actor").disabled = state.busy || !(state.dashboard?.members.length);
   $("status-filter").disabled = state.busy || !state.dashboard;
   for (const button of document.querySelectorAll(".queue-item")) button.disabled = state.busy;
-  $("evidence-kind").disabled = locked;
-  $("evidence-reference").disabled = locked;
-  $("add-evidence").disabled = locked;
-  $("review-note").disabled = locked || item.status === "RESOLVED";
+  $("evidence-reference").disabled = locked || !canAddEvidence;
+  $("evidence-kind").disabled = locked || !canAddEvidence;
+  $("add-evidence").disabled = locked || !canAddEvidence;
+  $("review-note").disabled = locked || !canVerify || item?.status === "RESOLVED";
   $("completion").disabled = state.busy || !editable || item.type !== "CORE";
   $("support-value").disabled = state.busy || !editable || item.type === "CORE";
   $("quality").disabled = state.busy || !editable;
   $("preview").disabled = state.busy || !editable;
-  $("confirm").disabled = locked || self || !pending || Object.keys(scoreChanges()).length > 0;
+  $("confirm").disabled = locked || !canVerify || self || !pending || Object.keys(scoreChanges()).length > 0;
   $("adjust").disabled = locked || self || !pending || !state.preview?.scoreChanged;
-  $("dispute").disabled = locked || !(pending || item?.status === "VERIFIED");
-  $("resolve").disabled = locked || self || !disputed || !state.preview;
+  $("dispute").disabled = locked || !canVerify || !(pending || item?.status === "VERIFIED");
+  $("resolve").disabled = locked || !canVerify || self || !disputed || !state.preview;
   $("action-hint").textContent = !item ? "" : item.status === "RESOLVED" ? "争议已解决，可查看最终结果和处理记录。"
     : self ? "不能确认、调整或解决自己的贡献；可以添加证据或提出争议。"
     : pending ? "直接确认现有提议分值；调整时先预览，分数必须实际变化。"
@@ -172,6 +174,8 @@ async function reloadData() {
   $("review-project").replaceChildren(...projects.map((project) => new Option(project.name, project.id)));
   if (!projectId) throw new Error("尚无项目");
   $("review-project").value = projectId;
+  const members = await request(`/api/projects/${encodeURIComponent(projectId)}/members`);
+  state.role = members.find((member) => member.id === Auth.member?.memberId)?.role || null;
   state.dashboard = await request(`/api/projects/${encodeURIComponent(projectId)}/dashboard`);
   const rows = visibleContributions();
   if (!rows.some((item) => item.id === state.selectedId)) state.selectedId = rows[0]?.id ?? null;
@@ -236,7 +240,7 @@ $("refresh").addEventListener("click", refresh);
 $("review-project").addEventListener("change", () => {
   localStorage.setItem("contribution-project", $("review-project").value);
   state.selectedId = null;
-  refresh();
+  Auth.ready.then((member) => { if (member) refresh(); });
 });
 $("status-filter").addEventListener("change", refresh);
 $("actor").addEventListener("change", () => { clearMessages(); invalidatePreview(); });
@@ -270,7 +274,7 @@ $("resolve").addEventListener("click", async () => {
   if (!state.preview || !$("score-form").reportValidity()) return;
   await mutate("resolve", { resolved_by: $("actor").value, resolution, ...scoreChanges() }, "解决争议");
 });
-refresh();
+Auth.ready.then((member) => { if (member) refresh(); });
 window.addEventListener("focus", refresh);
 window.addEventListener("storage", (event) => {
   if (event.key === "contribution-graph-update" || event.key === "contribution-project") refresh();

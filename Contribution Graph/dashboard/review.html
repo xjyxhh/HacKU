@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/review.css">
   <script src="/i18n.js" defer></script>
+  <script src="/auth.js" defer></script>
   <script src="/review.js" defer></script>
 </head>
 <body>
@@ -21,7 +22,7 @@
     <main id="main-content" tabindex="-1">
       <section class="intro">
         <div><p class="kicker">证据 / 同伴验证 / 争议处理</p><h1>贡献审核</h1><p class="intro-copy" id="project-name">正在读取项目…</p></div>
-        <div class="actor-box"><label for="actor">当前操作成员</label><select id="actor" disabled></select><small>演示身份选择，尚未接入登录</small></div>
+        <div class="actor-box"><label for="actor">当前操作成员</label><select id="actor" disabled></select><small>审核身份来自当前登录账号</small></div>
       </section>
       <div id="error" class="error" role="alert" hidden></div>
       <div id="success" class="notice" role="status" aria-live="polite" hidden></div>

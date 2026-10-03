@@ -42,8 +42,8 @@ def migrate_project(source_db, target_db, project_id):
     source_db, target_db = Path(source_db), Path(target_db)
     if not source_db.is_file():
         raise ValueError("source database not found")
-    if target_db.exists() and (not target_db.is_file() or target_db.stat().st_size != 0):
-        raise ValueError("target database already exists; refusing to overwrite")
+    if target_db.exists() and not target_db.is_file():
+        raise ValueError("target database path is not a file")
     # Open the legacy store through a read-only connection so migration can
     # never modify the website's live data.
     probe = sqlite3.connect(f"file:{source_db.resolve()}?mode=ro", uri=True)
@@ -88,8 +88,10 @@ def migrate_project(source_db, target_db, project_id):
             contract_id, item.task_id, item.helped_member_id, item.contributor_id,
             amount, amount,
         )
-        for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED", "DELIVERED", "VERIFIED"):
+        for status in ("OFFERED", "ACCEPTED", "CREDIT_RESERVED"):
             token.advance_contract(contract_id, status)
+        token.deliver_commission(contract_id, [f"legacy:{item.id}"])
+        token.advance_contract(contract_id, "VERIFIED")
         token.settle_commission(contract_id, amount,
                                 [f"legacy:{item.id}"], [store._legacy_token_approver(item)])
         return {"contributionId": item.id, "kind": "COMMISSION",

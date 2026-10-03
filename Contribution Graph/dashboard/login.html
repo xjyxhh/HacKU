@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#103c3d">
+  <title>Contribution Graph | 登录</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/auth.css">
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <main class="auth-shell">
+    <header class="auth-brand">
+      <span class="brand-mark" aria-hidden="true">CG</span>
+      <span>Contribution Graph</span>
+    </header>
+    <section class="panel auth-panel">
+      <p class="kicker">MEMBER SIGN IN</p>
+      <h1>成员登录</h1>
+      <p class="section-note">使用管理员为你开通的成员 ID 和密码登录。</p>
+      <div id="message" class="error" role="alert" hidden></div>
+      <form id="login-form" class="auth-form">
+        <label>成员 ID 或邮箱<input name="identifier" autocomplete="username" required maxlength="320"></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required minlength="12" maxlength="1024"></label>
+        <button type="submit">登录</button>
+      </form>
+      <p class="section-note">还没有账号？<a href="/register.html">注册新账号</a></p>
+    </section>
+    <details class="panel provision-panel">
+      <summary>管理员：开通或重置成员账号</summary>
+      <p class="section-note">仅对已加入项目的成员 ID 生效。操作需要服务端配置的 TOKEN_ADMIN_KEY；重置密码会使该成员的现有会话失效。</p>
+      <form id="provision-form" class="auth-form">
+        <label>管理员密钥<input name="admin_key" type="password" autocomplete="current-password" required></label>
+        <label>已有成员 ID<input name="member_id" required maxlength="256"></label>
+        <label>设置密码<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label>
+        <button type="submit">保存成员账号</button>
+      </form>
+    </details>
+  </main>
+</body>
+</html>

@@ -63,6 +63,9 @@ main:focus { outline: none; }
 .token-health { margin: 0 0 20px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); font-size: 13px; }
 .token-health a { color: inherit; font-weight: 700; }
 .token-state { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.setup-steps { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 0; padding-left: 22px; color: var(--muted); }
+.setup-steps .is-complete { color: var(--accent-ink); font-weight: 700; }
+.setup-steps a { color: var(--accent-ink); }
 .page-nav a:hover, .page-nav a:focus-visible { background: var(--accent-soft); color: var(--accent-ink); }
 .page-nav a[aria-current="page"], .review-link[aria-current="page"] { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
 .project-tag { color: var(--muted); font-size: 12px; white-space: nowrap; }

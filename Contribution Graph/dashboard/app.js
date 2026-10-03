@@ -35,7 +35,10 @@ const points = (value) => new Intl.NumberFormat("zh-CN", { maximumFractionDigits
 const tokenAmount = (value) => String(value ?? "0");
 let currentData = null;
 let selectedId = null;
-let projectId = localStorage.getItem("contribution-project") || "fintech";
+let currentMembership = [];
+const requestedProject = new URLSearchParams(location.search).get("project");
+let projectId = requestedProject || localStorage.getItem("contribution-project") || "fintech";
+if (requestedProject) localStorage.setItem("contribution-project", requestedProject);
 function setLanguage(next) {
   language = next === "en" ? "en" : "zh";
   I18n.setLanguage(language);
@@ -90,9 +93,9 @@ function renderMembers(data) {
   const recognition = data.tokenRecognition;
   $("members").innerHTML = data.members.map((member) => `
     <button class="member ${filterValue("member") === member.id ? "is-active" : ""}" type="button" data-member-id="${safe(member.id)}" aria-pressed="${filterValue("member") === member.id}">
-      <span class="member-top"><span class="identity"><span class="avatar" aria-hidden="true">${safe(member.name.slice(0, 1))}</span><span class="member-name">${safe(member.name)}</span></span><span class="share">${recognition ? "Token 余额" : `${Number(member.contributionShare).toFixed(2)}%`}</span></span>
-      <span class="member-score">${recognition ? safe(tokenAmount(recognition.balancesExact?.[member.id])) : points(member.totalScore)} <small>${recognition ? "Token" : t("分")}</small></span>
-      <span class="breakdown">${recognition ? `<span>旧贡献分 ${points(member.totalScore)}</span>` : categories.map((kind) => `<span>${typeName(kind)} <b>${points(member.breakdown[kind])}</b></span>`).join("")}</span>
+      <span class="member-top"><span class="identity"><span class="avatar" aria-hidden="true">${safe(member.name.slice(0, 1))}</span><span class="member-name">${safe(member.name)}</span></span><span class="share">${recognition ? "Token 持有量" : `${Number(member.contributionShare).toFixed(2)}%`}</span></span>
+      <span class="member-score">${recognition ? safe(tokenAmount(Number(recognition.balancesExact?.[member.id] || 0) + Number(recognition.lockedBalancesExact?.[member.id] || 0))) : points(member.totalScore)} <small>${recognition ? "Token" : t("分")}</small></span>
+      <span class="breakdown">${recognition ? `<span>可用 ${safe(tokenAmount(recognition.balancesExact?.[member.id] || "0"))}</span><span>冻结 ${safe(tokenAmount(recognition.lockedBalancesExact?.[member.id] || "0"))}</span><span>待铸 ${safe(tokenAmount(recognition.pendingMintsExact?.[member.id] || "0"))}</span>` : categories.map((kind) => `<span>${typeName(kind)} <b>${points(member.breakdown[kind])}</b></span>`).join("")}</span>
     </button>`).join("");
 }
 
@@ -238,6 +241,8 @@ function render(data) {
   fillSelect("member-filter", data.members, t("全部成员"));
   fillSelect("task-filter", data.tasks, t("全部任务"));
   fillRequiredSelect("contributor-input", data.members, t("选择贡献者"));
+  $("contributor-input").value = Auth.member?.memberId ?? "";
+  $("contributor-input").disabled = true;
   fillRequiredSelect("task-input", data.tasks, t("选择任务"));
   fillSelect("helped-input", data.members, t("无"), "");
   $("project-name").textContent = data.project.name;
@@ -261,6 +266,58 @@ function render(data) {
   renderInteractive();
   if (selectedId) loadDetail(selectedId);
   $("updated").textContent = `${language === "en" ? "Updated at" : "更新于"} ${new Date().toLocaleTimeString(language === "en" ? "en-US" : "zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+  renderProjectSetup(data);
+  renderMembership(currentMembership);
+}
+
+function renderProjectSetup(data) {
+  const steps = [
+    ["已创建项目", true, "#overview"],
+    ["添加项目成员", data.members.length > 1, "#membership-title"],
+    ["创建首个任务", data.tasks.length > 0, "#entry"],
+    ["提交首个贡献", data.contributions.length > 0, "#entry"],
+  ];
+  $("setup-steps").replaceChildren(...steps.map(([label, complete, target]) => {
+    const item = document.createElement("li");
+    item.className = complete ? "is-complete" : "";
+    item.textContent = `${complete ? "✓" : "○"} ${label}`;
+    if (!complete) {
+      const link = document.createElement("a");
+      link.href = target;
+      link.textContent = "前往设置";
+      item.append(" · ", link);
+    }
+    return item;
+  }));
+  const complete = steps.filter((step) => step[1]).length;
+  $("setup-progress").textContent = `${complete}/${steps.length}`;
+  $("project-setup").hidden = complete === steps.length;
+}
+
+function renderMembership(members) {
+  const list = $("membership-list");
+  const isOwner = members.some((member) =>
+    member.id === Auth.member?.memberId && member.role === "OWNER");
+  $("member-form").hidden = !isOwner;
+  list.replaceChildren(...members.map((member) => {
+    const card = document.createElement("article");
+    card.className = "member-card";
+    const title = document.createElement("h3");
+    title.textContent = member.name;
+    const detail = document.createElement("p");
+    detail.textContent = `${member.id} · ${member.role}${member.hasAccount ? "" : " · 尚未开通登录账号"}`;
+    card.append(title, detail);
+    if (isOwner && member.id !== Auth.member.memberId) {
+      const select = document.createElement("select");
+      select.dataset.memberRole = member.id;
+      for (const role of ["MEMBER", "VERIFIER", "VIEWER", "OWNER"]) {
+        select.add(new Option(role, role, false, role === member.role));
+      }
+      select.setAttribute("aria-label", `设置 ${member.name} 的项目角色`);
+      card.append(select);
+    }
+    return card;
+  }));
 }
 
 async function request(url, options) {
@@ -268,7 +325,7 @@ async function request(url, options) {
   const send = () => fetch(url, { cache: "no-store", ...options,
     headers: { ...options?.headers, ...(key ? { "X-Token-Admin-Key": key } : {}) } });
   let response = await send();
-  if (response.status === 403 && options?.method === "POST") {
+  if (response.status === 403 && options?.method === "POST" && url.startsWith("/api/token/")) {
     sessionStorage.removeItem("tokenAdminKey");
     key = prompt(I18n.t("请输入账本管理员密钥")) || "";
     if (key) { sessionStorage.setItem("tokenAdminKey", key); response = await send(); }
@@ -289,11 +346,26 @@ async function refresh() {
     if (!projects.some((item) => item.id === projectId)) projectId = projects[0]?.id ?? "";
     $("project-select").replaceChildren(...projects.map((item) => new Option(item.name, item.id)));
     $("project-select").value = projectId;
-    if (projectId) render(await request(`/api/projects/${encodeURIComponent(projectId)}/dashboard`));
+    if (projectId) {
+      const [data, members] = await Promise.all([
+        request(`/api/projects/${encodeURIComponent(projectId)}/dashboard`),
+        request(`/api/projects/${encodeURIComponent(projectId)}/members`),
+      ]);
+      currentMembership = members;
+      render(data);
+      $("no-project").hidden = true;
+      const role = members.find((member) => member.id === Auth.member?.memberId)?.role;
+      $("task-form").hidden = !["OWNER", "MEMBER"].includes(role);
+      $("contribution-form").hidden = !["OWNER", "MEMBER", "VERIFIER"].includes(role);
+    }
     else {
       currentData = null;
+      currentMembership = [];
       $("project-name").textContent = t("先创建一个项目");
       $("updated").textContent = t("尚无项目");
+      $("project-setup").hidden = true;
+      $("no-project").hidden = false;
+      renderMembership([]);
     }
     for (const id of ["member-form", "task-form", "contribution-form"]) {
       $(id).querySelector('button[type="submit"]').disabled = !projectId;
@@ -361,7 +433,7 @@ $("project-select").addEventListener("change", () => {
   selectedId = null;
   $("detail").hidden = true;
   for (const name of ["member", "task", "type", "status"]) $(`${name}-filter`).value = "ALL";
-  refresh();
+  Auth.ready.then((member) => { if (member) refresh(); });
 });
 for (const name of ["member", "task", "type", "status"]) $(`${name}-filter`).addEventListener("change", renderInteractive);
 $("sort-order").addEventListener("change", renderInteractive);
@@ -391,22 +463,25 @@ $("graph").addEventListener("keydown", (event) => {
   event.preventDefault();
   target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 });
-$("project-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const payload = Object.fromEntries(new FormData(form));
-  submitForm(form, "/api/projects", payload, async () => {
-    projectId = payload.id;
-    localStorage.setItem("contribution-project", projectId);
-    selectedId = null;
-    await refresh();
-    form.reset();
-  });
-});
 $("member-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  submitForm(form, `/api/projects/${encodeURIComponent(projectId)}/members`, Object.fromEntries(new FormData(form)), async () => { await refresh(); form.reset(); });
+  submitForm(form, `/api/projects/${encodeURIComponent(projectId)}/members/invite`, Object.fromEntries(new FormData(form)), async () => { await refresh(); form.reset(); });
+});
+$("membership-list").addEventListener("change", async (event) => {
+  const select = event.target.closest("[data-member-role]");
+  if (!select) return;
+  try {
+    await request(`/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(select.dataset.memberRole)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: select.value }),
+    });
+    await refresh();
+  } catch (error) {
+    $("error").textContent = `角色更新失败：${error.message}`;
+    $("error").hidden = false;
+  }
 });
 $("task-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -417,6 +492,7 @@ $("contribution-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const payload = Object.fromEntries(new FormData(form));
+  payload.contributor_id = Auth.member.memberId;
   if (payload.contributor_id === payload.helped_member_id) {
     $("form-message").dataset.source = "受帮助成员不能与贡献者相同。";
     $("form-message").textContent = t($("form-message").dataset.source);

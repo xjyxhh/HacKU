@@ -23,14 +23,17 @@ class AdversarialFixTests(unittest.TestCase):
     def test_token_writes_need_admin_key_and_nonfinite_json_is_422(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            legacy = ContributionStore(root / "data.sqlite3")
+            legacy.create_project("p", "Project")
+            legacy.add_member("p", "alice", "Alice")
             client = TestClient(create_app(root / "data.sqlite3", root / "token.sqlite3",
                                            token_admin_key="secret"))
             body = {"id": "p", "name": "Project", "treasury_id": "treasury", "member_ids": ["alice"]}
-            self.assertEqual(client.post("/api/token/project", json=body).status_code, 403)
-            self.assertEqual(client.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 403)
+            self.assertEqual(client.post("/api/token/project", json=body).status_code, 401)
+            self.assertEqual(client.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 401)
             disabled = TestClient(create_app(root / "other.sqlite3", root / "other-token.sqlite3",
                                              token_admin_key=""))
-            self.assertEqual(disabled.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 503)
+            self.assertEqual(disabled.post("/api/projects", json={"id": "p", "name": "Project"}).status_code, 401)
             self.assertEqual(client.post("/api/token/project", json=body,
                                          headers={"X-Token-Admin-Key": "secret"}).status_code, 201)
             self.assertEqual(client.post("/api/token/tasks", content=b'{"id":"t","name":"T","value_type":"CORE","mint_cap":NaN,"acceptance_criteria":"done"}',
@@ -40,7 +43,8 @@ class AdversarialFixTests(unittest.TestCase):
                 "mint_cap": "1e400", "acceptance_criteria": "Done",
             }, headers={"X-Token-Admin-Key": "secret"})
             self.assertEqual(too_large.status_code, 400)
-            self.assertEqual(client.get("/api/token/tasks").json(), [])
+            self.assertEqual(client.get("/api/token/tasks",
+                                        headers={"X-Token-Admin-Key": "secret"}).json(), [])
 
     def test_support_dispute_and_resolution_match_legacy_score(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,7 +110,7 @@ class AdversarialFixTests(unittest.TestCase):
             self.assertEqual(TokenStore(path).project, project)
             self.assertEqual(ContributionStore(path).projects["p"].name, "Project")
 
-    def test_concurrent_initialization_keeps_one_project(self):
+    def test_concurrent_initialization_keeps_all_distinct_projects(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "token.sqlite3"
             outcomes = []
@@ -123,9 +127,11 @@ class AdversarialFixTests(unittest.TestCase):
                 worker.start()
             for worker in workers:
                 worker.join()
-            self.assertEqual(outcomes.count("created"), 1)
-            self.assertEqual(outcomes.count("rejected"), 5)
-            self.assertTrue(TokenStore(path).project.id.startswith("p"))
+            self.assertEqual(outcomes.count("created"), 6)
+            self.assertEqual(outcomes.count("rejected"), 0)
+            self.assertEqual({
+                TokenStore(path, project_id=f"p{index}").project.id for index in range(6)
+            }, {f"p{index}" for index in range(6)})
 
     def test_read_does_not_wait_for_writer_reservation(self):
         with tempfile.TemporaryDirectory() as directory:

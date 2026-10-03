@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#103c3d">
+  <title>Contribution Graph · Demo</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/demo.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">CG</span><span>Contribution Graph · Demo</span></div><div class="top-actions"><a class="review-link" href="/landing.html">产品介绍</a><a class="review-link" href="/register.html">注册</a><a class="review-link" href="/login.html">登录</a></div></header>
+    <main id="main-content">
+      <section class="intro"><div><p class="kicker">PUBLIC DEMO</p><h1 id="project-name">正在加载示例…</h1><p class="intro-copy">这是公开的虚构样例数据，不会暴露项目数据库内容。</p></div></section>
+      <div id="error" class="error" role="alert" hidden></div>
+      <section class="summary"><div><span>成员</span><strong id="member-count">—</strong></div><div><span>任务</span><strong id="task-count">—</strong></div><div><span>贡献记录</span><strong id="contribution-count">—</strong></div><div><span>已验证总分</span><strong id="total-score">—</strong></div></section>
+      <div class="overview-grid">
+        <section class="panel"><h2>成员贡献</h2><div id="members" class="members"></div></section>
+        <section class="panel"><h2>任务与验收价值</h2><div id="tasks" class="members"></div></section>
+      </div>
+      <section class="panel"><h2>贡献流水</h2><div id="contributions" class="token-list"></div></section>
+    </main>
+  </div>
+</body>
+</html>

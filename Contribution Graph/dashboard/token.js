@@ -5,23 +5,44 @@ const number = (value) => typeof value === "string"
 const kindName = { MINT: "铸币", TRANSFER: "转账", FREEZE: "冻结", RELEASE: "释放", REFUND: "退款", SPLIT: "分配" };
 const statusName = { DRAFT: "草稿", OFFERED: "已发出", ACCEPTED: "已接受", CREDIT_RESERVED: "已预留", DELIVERED: "已交付", VERIFIED: "已验证", DISPUTED: "争议中", FROZEN: "已冻结", SETTLED: "已结算" };
 const nextStatus = { DRAFT: "OFFERED", OFFERED: "ACCEPTED", ACCEPTED: "CREDIT_RESERVED", CREDIT_RESERVED: "DELIVERED", DELIVERED: "VERIFIED", DISPUTED: "FROZEN", FROZEN: "DELIVERED" };
-const state = { ledger: null, graph: null, contracts: [], tasks: [], budgets: {}, debts: [], projects: [], busy: false };
-const focusedEventId = new URLSearchParams(location.search).get("event");
+const graphViews = {
+  value: new Set(["CONTRIBUTES_TO", "CREATED_VALUE", "MINTED"]),
+  flow: new Set(["MINTED", "PAID", "SPLIT", "REFUNDED"]),
+  collaboration: new Set(["COMMISSIONED", "EXECUTED", "CONTRIBUTES_TO", "PAID", "SPLIT"]),
+  trust: new Set(["APPROVED", "DISPUTED", "FROZEN", "RELEASED"]),
+};
+const state = { ledger: null, graph: null, contracts: [], tasks: [], budgets: {}, debts: [], projects: [], role: null, memberId: null, busy: false };
+let focusedEventId = new URLSearchParams(location.search).get("event");
 
 async function request(path, body) {
   let key = sessionStorage.getItem("tokenAdminKey") || "";
-  const send = () => fetch(path, { cache: "no-store", ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { "X-Token-Admin-Key": key } : {}) }, body: JSON.stringify(body) }) });
+  const send = () => fetch(path, {
+    cache: "no-store",
+    headers: {
+      ...(localStorage.getItem("contribution-project") ? { "X-Project-ID": localStorage.getItem("contribution-project") } : {}),
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(key ? { "X-Token-Admin-Key": key } : {}),
+    },
+    ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
+  });
   let response = await send();
-  if (response.status === 403 && body !== undefined) {
+  let payload = await response.clone().json();
+  if (response.status === 403 && payload.detail === "invalid token admin key") {
     sessionStorage.removeItem("tokenAdminKey");
     key = prompt(I18n.t("请输入服务启动时配置的 TOKEN_ADMIN_KEY")) || "";
     if (key) {
       sessionStorage.setItem("tokenAdminKey", key);
       response = await send();
+      payload = await response.clone().json();
       if (response.status === 403) sessionStorage.removeItem("tokenAdminKey");
     }
+    function applyRoleVisibility() {
+      for (const element of document.querySelectorAll("[data-roles]")) {
+        element.hidden = !element.dataset.roles.split(",").includes(state.role);
+      }
+    }
   }
-  const data = await response.json();
+  const data = payload;
   if (!response.ok) {
     const detail = data.detail ?? data.error;
     throw new Error(Array.isArray(detail) ? detail.map((item) => `${item.loc?.slice(1).join(".") || "输入"}：${item.msg}`).join("；") : detail || `请求失败 (${response.status})`);
@@ -47,6 +68,7 @@ const nodeName = (address) => state.graph?.nodes.find((node) => node.address.joi
 function renderGraph() {
   const svg = $("token-graph");
   const graph = state.graph;
+  const edges = graph.edges.filter((edge) => graphViews[$("graph-view").value]?.has(edge.kind));
   const kinds = ["PROJECT", "TREASURY", "MEMBER", "COMMISSION_CONTRACT", "TASK"];
   const columns = kinds.map((kind) => graph.nodes.filter((node) => node.kind === kind));
   const height = Math.max(220, ...columns.map((nodes) => nodes.length * 62 + 38));
@@ -63,7 +85,7 @@ function renderGraph() {
   columns.forEach((nodes, column) => nodes.forEach((node, row) => {
     positions.set(node.address.join("/"), { x: 12 + column * 196, y: 20 + row * 62 });
   }));
-  for (const edge of graph.edges) {
+  for (const edge of edges) {
     const source = positions.get(edge.source.join("/"));
     const destination = positions.get(edge.destination.join("/"));
     if (!source || !destination) continue;
@@ -92,6 +114,7 @@ function listEmpty(id, count, messageText) { $(id).hidden = count > 0; if (!coun
 
 function render() {
   const { ledger, graph, contracts, budgets } = state;
+  applyRoleVisibility();
   $("workspace").hidden = false;
   $("setup").hidden = true;
   $("project-name").textContent = `${projectName(ledger.projectId)} · ${ledger.projectId}`;
@@ -100,7 +123,23 @@ function render() {
   $("task-count").textContent = tokenTasks().length;
   $("event-count").textContent = ledger.events.length;
   $("treasury").textContent = `金库 ${ledger.treasuryId}`;
-  $("balance-list").innerHTML = ledger.memberIds.map((id) => `<div class="balance-row"><span>${safe(id)}</span><strong>${number(ledger.balancesExact?.[id] ?? ledger.balances[id])}</strong></div>`).join("");
+  $("balance-list").innerHTML = ledger.memberIds.map((id) => {
+    const available = Number(ledger.balancesExact?.[id] ?? ledger.balances[id]) || 0;
+    const locked = (ledger.events || []).filter((event) => ["MINT", "TRANSFER", "SPLIT"].includes(event.kind)
+      && event.destinationId === id && event.frozen).reduce((total, event) => total + Number(event.amountExact ?? event.amount), 0);
+    const memberEvents = ledger.events.filter((event) => event.sourceId === id || event.destinationId === id);
+    const lines = memberEvents.map((event) => {
+      const amount = Number(event.amountExact ?? event.amount);
+      const delta = event.kind === "FREEZE" ? (event.sourceId === id ? -amount : 0)
+        : event.kind === "RELEASE" ? (event.sourceId === id ? amount : 0)
+          : (event.destinationId === id ? amount : 0) - (event.sourceId === id ? amount : 0);
+      if (!delta) return "";
+      const sign = delta > 0 ? "+" : "−";
+      return `<li><a href="#activity" data-focus-event="${safe(event.id)}">#${event.sequence} ${safe(kindName[event.kind] || event.kind)}</a> ${sign}${number(Math.abs(delta))} · ${safe(event.note || event.taskId)}</li>`;
+    }).filter(Boolean);
+    return `<details class="balance-row"><summary><span>${safe(id)}</span><strong>${number(available + locked)} Token</strong></summary><p>可用 ${number(available)} · 冻结 ${number(locked)} · 待铸 ${number(ledger.pendingMintsExact?.[id] || 0)}</p>${lines.length ? `<ul>${lines.join("")}</ul>` : "<p>暂无余额变动。</p>"}</details>`;
+  }).join("");
+  applyRoleVisibility();
   listEmpty("balance-list", ledger.memberIds.length, "账本尚无成员。");
   const openDebts = state.debts.filter((debt) => /[1-9]/.test(debt.remainingExact));
   $("debt-list").innerHTML = openDebts
@@ -110,7 +149,7 @@ function render() {
   $("task-list").innerHTML = taskEntries.map(([id, name]) => {
     const budget = budgets[id];
     const task = state.tasks.find((item) => item.id === id);
-    return `<article class="token-row"><div><strong>${safe(name)}</strong><small>${safe(id)} · ${safe(task.valueType)}</small><p>验收标准：${safe(task.acceptanceCriteria)}</p><form class="cap-form" data-id="${safe(id)}"><label>调整铸币上限<input name="mint_cap" type="number" min="0" step="any" value="${safe(task.mintCap)}" required></label><button type="submit">保存上限</button></form></div><dl class="budget-values"><div><dt>上限</dt><dd>${number(budget.mintCap)}</dd></div><div><dt>已铸</dt><dd>${number(budget.minted)}</dd></div><div><dt>预留</dt><dd>${number(budget.reserved)}</dd></div><div><dt>可用</dt><dd>${number(budget.available)}</dd></div></dl></article>`;
+    return `<article class="token-row"><div><strong>${safe(name)}</strong><small>${safe(id)} · ${safe(task.valueType)}</small><p>验收标准：${safe(task.acceptanceCriteria)}</p><form class="cap-form" data-id="${safe(id)}" data-roles="OWNER"><label>调整铸币上限<input name="mint_cap" type="number" min="0" step="any" value="${safe(task.mintCap)}" required></label><button type="submit">保存上限</button></form></div><dl class="budget-values"><div><dt>上限</dt><dd>${number(budget.mintCap)}</dd></div><div><dt>已铸</dt><dd>${number(budget.minted)}</dd></div><div><dt>预留</dt><dd>${number(budget.reserved)}</dd></div><div><dt>可用</dt><dd>${number(budget.available)}</dd></div></dl></article>`;
   }).join("");
   listEmpty("task-list", taskEntries.length, "暂无 Token 任务，请先添加任务。");
   selectOptions(".task-select", taskEntries);
@@ -120,19 +159,34 @@ function render() {
   $("contract-list").innerHTML = contracts.map((contract) => {
     const next = nextStatus[contract.status];
     const approvers = ledger.memberIds.filter((id) => id !== contract.principalId && id !== contract.contractorId);
-    const canSettle = contract.status === "VERIFIED" && approvers.length > 0;
-    const canDispute = contract.status === "DELIVERED" || contract.status === "VERIFIED";
-    return `<article class="token-row contract-row"><div><strong>${safe(contract.id)}</strong><small>${safe(contract.principalId)} → ${safe(contract.contractorId)} · ${safe(contract.taskId)}</small><p>价格 ${number(contract.contractPriceExact ?? contract.contractPrice)}，最高铸币 ${number(contract.maximumMintValueExact ?? contract.maximumMintValue)}</p>${contract.status === "SETTLED" ? `<p>实际铸币 ${number(contract.verifiedMintValueExact ?? contract.verifiedMintValue)}；批准成员 ${safe(contract.approverIds.join("、"))}；证据 ${safe(contract.evidenceHashes.join("、"))}</p>` : ""}${contract.status === "VERIFIED" && !approvers.length ? "<p>没有独立批准成员；请先在项目中添加第三位成员并同步。</p>" : ""}</div><div class="contract-action"><span class="contract-status">${safe(statusName[contract.status] || contract.status)}</span>${next ? `<button type="button" data-contract="${safe(contract.id)}" data-next="${next}">推进到${safe(statusName[next])}</button>` : ""}${canDispute ? `<button type="button" data-contract="${safe(contract.id)}" data-next="DISPUTED">提出争议</button>` : ""}${canSettle ? `<button type="button" data-settle="${safe(contract.id)}">结算</button>` : ""}</div>${canSettle ? `<form class="settle-form" data-id="${safe(contract.id)}"><label>验证铸币值<input name="verified_mint_value" type="number" min="0.000000001" max="${safe(contract.maximumMintValue)}" step="any" required></label><label>独立批准成员<select name="approver_ids" required>${approvers.map((id) => `<option value="${safe(id)}">${safe(id)}</option>`).join("")}</select></label><label>证据标识<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">确认结算</button></form>` : ""}</article>`;
+    const canSettle = contract.status === "VERIFIED" && approvers.length > 0
+      && ["OWNER", "VERIFIER"].includes(state.role);
+    const canDispute = (contract.status === "DELIVERED" || contract.status === "VERIFIED")
+      && (["OWNER", "VERIFIER"].includes(state.role)
+        || state.memberId === contract.principalId || state.memberId === contract.contractorId);
+    const canAdvance = {
+      OFFERED: state.memberId === contract.principalId,
+      ACCEPTED: state.memberId === contract.contractorId,
+      CREDIT_RESERVED: state.memberId === contract.principalId,
+      VERIFIED: ["OWNER", "VERIFIER"].includes(state.role)
+        && ![contract.principalId, contract.contractorId].includes(state.memberId),
+      FROZEN: ["OWNER", "VERIFIER"].includes(state.role),
+    }[next];
+    const needsDelivery = (contract.status === "CREDIT_RESERVED" || contract.status === "FROZEN")
+      && state.memberId === contract.contractorId;
+    const showAdvance = next && next !== "DELIVERED" && canAdvance;
+    return `<article class="token-row contract-row"><div><strong>${safe(contract.id)}</strong><small>${safe(contract.principalId)} → ${safe(contract.contractorId)} · ${safe(contract.taskId)}</small><p>价格 ${number(contract.contractPriceExact ?? contract.contractPrice)}，最高铸币 ${number(contract.maximumMintValueExact ?? contract.maximumMintValue)}</p>${contract.evidenceHashes?.length ? `<p>交付证据 ${safe(contract.evidenceHashes.join("、"))}</p>` : ""}${contract.status === "SETTLED" ? `<p>实际铸币 ${number(contract.verifiedMintValueExact ?? contract.verifiedMintValue)}；批准成员 ${safe(contract.approverIds.join("、"))}</p>` : ""}${contract.status === "VERIFIED" && !approvers.length ? "<p>没有独立批准成员；请先在项目中添加第三位成员并同步。</p>" : ""}</div><div class="contract-action"><span class="contract-status">${safe(statusName[contract.status] || contract.status)}</span>${showAdvance ? `<button type="button" data-contract="${safe(contract.id)}" data-next="${next}">推进到${safe(statusName[next])}</button>` : ""}${canDispute ? `<button type="button" data-contract="${safe(contract.id)}" data-next="DISPUTED">提出争议</button>` : ""}${canSettle ? `<button type="button" data-settle="${safe(contract.id)}">结算</button>` : ""}</div>${needsDelivery ? `<form class="delivery-form" data-id="${safe(contract.id)}"><label>交付证据（每行一个标识）<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">提交交付</button></form>` : ""}${canSettle ? `<form class="settle-form" data-id="${safe(contract.id)}"><label>验证铸币值<input name="verified_mint_value" type="number" min="0.000000001" max="${safe(contract.maximumMintValue)}" step="any" required></label><label>独立批准成员<select name="approver_ids" required>${approvers.map((id) => `<option value="${safe(id)}">${safe(id)}</option>`).join("")}</select></label><label>结算证据标识<textarea name="evidence_hashes" rows="2" required></textarea></label><button type="submit">确认结算</button></form>` : ""}</article>`;
   }).join("");
   listEmpty("contract-list", contracts.length, "暂无委托合约。");
   for (const form of document.querySelectorAll(".settle-form")) form.hidden = true;
   renderEvents();
   renderFreezeOptions();
-  $("graph-summary").textContent = `${graph.nodes.length} 个节点，${graph.edges.length} 条关系`;
+  $("graph-summary").textContent = `${graph.nodes.length} 个节点，当前视图 ${edges.length} 条关系`;
   renderGraph();
   $("graph-nodes").innerHTML = graph.nodes.map((node) => `<span><small>${safe(node.kind)}</small>${safe(node.label)}</span>`).join("");
-  $("graph-list").innerHTML = graph.edges.map((edge) => `<div class="graph-edge"><span>${safe(nodeName(edge.source))}</span><span class="graph-edge-kind">${safe(edge.kind)}${edge.amount == null ? "" : ` · ${number(edge.amount)}`}</span><span>${safe(nodeName(edge.destination))}</span></div>`).join("");
-  listEmpty("graph-list", graph.edges.length, "还没有关系。创建合约或发生账本事件后会显示在这里。");
+  const visibleEdges = graph.edges.filter((edge) => graphViews[$("graph-view").value]?.has(edge.kind));
+  $("graph-list").innerHTML = visibleEdges.map((edge) => `<div class="graph-edge"><span>${safe(nodeName(edge.source))}</span><span class="graph-edge-kind">${safe(edge.kind)}${edge.amount == null ? "" : ` · ${number(edge.amount)}`}</span><span>${safe(nodeName(edge.destination))}</span></div>`).join("");
+  listEmpty("graph-list", visibleEdges.length, "此视图暂时没有关系；发生贡献、结算或验证后会显示。");
   updateTimestamp();
 }
 function updateTimestamp() {
@@ -147,7 +201,7 @@ function renderEvents() {
 function renderFreezeOptions() {
   const events = state.ledger?.events || [];
   const action = $("freeze-action").value;
-  const entries = events.filter((event) => ["MINT", "TRANSFER"].includes(event.kind))
+  const entries = events.filter((event) => ["MINT", "TRANSFER", "SPLIT"].includes(event.kind))
     .filter((event) => action === "freeze" ? !event.frozen : event.frozen)
     .map((event) => [String(event.sequence), `#${event.sequence} ${kindName[event.kind]} · ${event.id} · ${number(event.amount)}`]);
   selectOptions("#mint-event", entries);
@@ -180,10 +234,28 @@ async function refresh() {
   try {
     state.projects = await request("/api/projects");
     selectOptions("#legacy-project", state.projects.map((project) => [project.id, project.name]));
+    const selectedProject = localStorage.getItem("contribution-project");
+    const projectId = state.projects.some((project) => project.id === selectedProject)
+      ? selectedProject : (state.projects[0]?.id || "");
+    if (projectId) localStorage.setItem("contribution-project", projectId);
+    selectOptions("#token-project-select", state.projects.map((project) => [project.id, project.name]));
+    $("token-project-select").value = projectId;
+    if (!projectId) {
+      $("workspace").hidden = true;
+      $("setup").hidden = true;
+      $("empty-workspace").hidden = false;
+      $("project-name").textContent = "请先创建或加入项目";
+      return;
+    }
+    $("empty-workspace").hidden = true;
+    const members = await request(`/api/projects/${encodeURIComponent(projectId)}/members`);
+    state.memberId = Auth.member?.memberId || null;
+    state.role = members.find((member) => member.id === state.memberId)?.role || "OWNER";
     let ledger;
     try { ledger = await request("/api/token/ledger"); }
     catch (error) {
-      if (!String(error.message).startsWith("unknown token ledger")) throw error;
+      if (!String(error.message).startsWith("unknown token ledger")
+          && !String(error.message).startsWith("unknown token project")) throw error;
       state.ledger = null; $("workspace").hidden = true; $("setup").hidden = false;
       $("project-name").textContent = "尚未启用 Token 账本";
       const selected = localStorage.getItem("contribution-project");
@@ -274,6 +346,10 @@ $("legacy-project").addEventListener("change", async () => {
   await fillProjectDefaults($("legacy-project").value);
   await loadPreview();
 });
+$("token-project-select").addEventListener("change", (event) => {
+  localStorage.setItem("contribution-project", event.target.value);
+  refresh();
+});
 $("contract-list").addEventListener("click", (event) => {
   const advance = event.target.closest("[data-next]");
   const settle = event.target.closest("[data-settle]");
@@ -284,6 +360,14 @@ $("contract-list").addEventListener("click", (event) => {
   }
 });
 $("contract-list").addEventListener("submit", (event) => {
+  if (event.target.matches(".delivery-form")) {
+    event.preventDefault();
+    const form = event.target;
+    const body = { status: "DELIVERED", evidence_hashes: evidence(form.elements.evidence_hashes.value) };
+    if (!body.evidence_hashes.length) { message("请填写交付证据。", true); return; }
+    mutate(`/api/token/contracts/${encodeURIComponent(form.dataset.id)}/advance`, body, "委托交付已提交。");
+    return;
+  }
   if (!event.target.matches(".settle-form")) return;
   event.preventDefault();
   const form = event.target;
@@ -294,6 +378,17 @@ $("contract-list").addEventListener("submit", (event) => {
   mutate(`/api/token/contracts/${encodeURIComponent(form.dataset.id)}/settle`, body, "合约已结算。");
 });
 $("event-filter").addEventListener("change", renderEvents);
+$("graph-view").addEventListener("change", () => { if (state.graph) refresh(); });
+$("balance-list").addEventListener("click", (event) => {
+  const link = event.target.closest("[data-focus-event]");
+  if (!link) return;
+  event.preventDefault();
+  const eventId = link.dataset.focusEvent;
+  $("event-filter").value = "ALL";
+  history.pushState(null, "", `?event=${encodeURIComponent(eventId)}#activity`);
+  focusedEventId = eventId;
+  renderEvents();
+});
 $("freeze-action").addEventListener("change", renderFreezeOptions);
 $("freeze-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -312,4 +407,4 @@ window.addEventListener("storage", (event) => {
 });
 window.addEventListener("focus", refresh);
 document.addEventListener("languagechange", () => { if (state.ledger) updateTimestamp(); });
-refresh();
+Auth.ready.then((member) => { if (member) refresh(); });

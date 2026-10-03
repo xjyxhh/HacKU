@@ -27,6 +27,7 @@ from token_engine import (
     TokenTask,
     ValueType,
     _amount,
+    evidence_key,
 )
 
 
@@ -50,8 +51,9 @@ def _marker_target(event, target_ids):
 class TokenStore:
     """Durable TokenLedger: in-memory rules + append-only SQLite storage."""
 
-    def __init__(self, path, project: TokenProject | None = None):
+    def __init__(self, path, project: TokenProject | None = None, project_id=None):
         self.path = Path(path)
+        self.project_id = project.id if project is not None else project_id
         if project is not None:
             self._ledger = TokenLedger(project)
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,10 +63,11 @@ class TokenStore:
             except FileExistsError:
                 pass
             with self._write(initializing=True) as conn:
-                if conn.execute("SELECT 1 FROM token_projects LIMIT 1").fetchone():
-                    raise ValueError("token ledger already exists; refusing to overwrite")
-                if any(conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
-                       for table in ("token_tasks", "commission_contracts", "ledger_events")):
+                if conn.execute("SELECT 1 FROM token_projects WHERE id = ?", (project.id,)).fetchone():
+                    raise ValueError("token project already exists; refusing to overwrite")
+                if (not conn.execute("SELECT 1 FROM token_projects LIMIT 1").fetchone()
+                        and any(conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                                for table in ("token_tasks", "commission_contracts", "ledger_events"))):
                     raise ValueError("incomplete token ledger contains records; repair it manually")
                 self._insert_project(conn, project)
         else:
@@ -133,13 +136,20 @@ class TokenStore:
         a read-only connection and observe one committed SQLite snapshot.
         """
         stored = conn.execute(
-            "SELECT id, name, treasury_id, member_ids FROM token_projects"
+            "SELECT id, name, treasury_id, member_ids FROM token_projects ORDER BY rowid"
         ).fetchall()
         if not stored:
             raise ValueError("no token project stored; recreate the incomplete ledger")
-        if len(stored) > 1:
-            raise ValueError("TokenStore supports exactly one token project per database file")
-        project_id, name, treasury_id, member_ids = stored[0]
+        if self.project_id is None:
+            if len(stored) > 1:
+                raise ValueError("token project id is required when a database contains multiple projects")
+            selected = stored[0]
+        else:
+            selected = next((item for item in stored if item[0] == self.project_id), None)
+            if selected is None:
+                raise ValueError(f"unknown token project {self.project_id}")
+        project_id, name, treasury_id, member_ids = selected
+        self.project_id = project_id
         members = json.loads(member_ids)
         if not isinstance(members, list) or not all(isinstance(item, str) for item in members):
             raise ValueError("token project member_ids must be a JSON string array")
@@ -163,8 +173,9 @@ class TokenStore:
             "WHERE project_id = ? ORDER BY row_sequence",
             (self.project.id,),
         ):
-            (contract_id, task_id, principal_id, contractor_id, value_type, price,
+            (stored_contract_id, task_id, principal_id, contractor_id, value_type, price,
              maximum, criteria_hash, status, evidence, approvers, verified, _seq) = row
+            contract_id = self._unscope_id(stored_contract_id, project_id)
             evidence_values, approver_values = json.loads(evidence), json.loads(approvers)
             if (not isinstance(evidence_values, list) or not isinstance(approver_values, list)
                     or not all(isinstance(value, str) for value in evidence_values + approver_values)):
@@ -188,13 +199,16 @@ class TokenStore:
             )
             self._ledger.contracts[contract_id] = contract
             contracts.append(contract)
-        for row in conn.execute(
+        for local_sequence, row in enumerate(conn.execute(
             "SELECT sequence, id, kind, amount, source_id, destination_id, task_id, "
             "contract_id, evidence_key, note FROM ledger_events "
             "WHERE project_id = ? ORDER BY sequence",
             (self.project.id,),
-        ):
-            sequence, event_id, kind, amount, source, destination, task_id, contract_id, key, note = row
+        ), start=1):
+            _stored_sequence, stored_event_id, kind, amount, source, destination, task_id, stored_contract_id, key, note = row
+            event_id = self._unscope_id(stored_event_id, self.project.id)
+            contract_id = (self._unscope_id(stored_contract_id, self.project.id)
+                           if stored_contract_id is not None else None)
             event_kind = LedgerEventType(kind)
             self._ledger._task(task_id)
             if contract_id is not None and contract_id not in self._ledger.contracts:
@@ -203,24 +217,29 @@ class TokenStore:
                 if source != self.project.treasury_id:
                     raise ValueError("mint source must be the treasury")
                 self._ledger._member(destination)
-            elif event_kind == LedgerEventType.TRANSFER:
+            elif event_kind in {LedgerEventType.TRANSFER, LedgerEventType.SPLIT,
+                                LedgerEventType.REFUND}:
                 self._ledger._member(source)
                 if destination != self.project.treasury_id:
                     self._ledger._member(destination)
+                if event_kind == LedgerEventType.REFUND and destination != self.project.treasury_id:
+                    raise ValueError("refund destination must be the treasury")
             elif event_kind in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
                 self._ledger._member(source)
             value = _amount(amount, "stored event amount")
             event = LedgerEvent(
-                sequence, event_id, self.project.id, event_kind, value,
+                local_sequence, event_id, self.project.id, event_kind, value,
                 source, destination, task_id, contract_id, key, note,
             )
             self._ledger.events.append(event)
             self._ledger._event_ids.add(event.id)
         # Replay freeze state in one pass, including older id-based markers.
         target_ids = {event.id: event.sequence for event in self._ledger.events
-                      if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER)}
+                      if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER,
+                                        LedgerEventType.SPLIT)}
         targets_by_sequence = {event.sequence: event for event in self._ledger.events
-                               if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER)}
+                               if event.kind in (LedgerEventType.MINT, LedgerEventType.TRANSFER,
+                                                 LedgerEventType.SPLIT)}
         marker_counts = {}
         for event in self._ledger.events:
             if event.kind not in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
@@ -265,6 +284,22 @@ class TokenStore:
              json.dumps(list(project.member_ids))),
         )
 
+    @staticmethod
+    def _scope_id(project_id, value):
+        return f"{len(project_id)}:{project_id}:{value}"
+
+    @staticmethod
+    def _unscope_id(value, project_id):
+        prefix = f"{len(project_id)}:{project_id}:"
+        return value[len(prefix):] if value.startswith(prefix) else value
+
+    def _stored_contract_id(self, conn, project_id, contract_id):
+        row = conn.execute(
+            "SELECT id FROM commission_contracts WHERE project_id = ? AND id IN (?, ?) LIMIT 1",
+            (project_id, contract_id, self._scope_id(project_id, contract_id)),
+        ).fetchone()
+        return row[0] if row else self._scope_id(project_id, contract_id)
+
     def _insert_task(self, conn, task: TokenTask):
         conn.execute(
             "INSERT INTO token_tasks (id, project_id, name, value_type, mint_cap, acceptance_criteria) "
@@ -274,13 +309,17 @@ class TokenStore:
         )
 
     def _insert_contract(self, conn, contract: CommissionContract):
-        row_sequence = conn.execute("SELECT COUNT(*) FROM commission_contracts").fetchone()[0]
+        row_sequence = conn.execute(
+            "SELECT COUNT(*) FROM commission_contracts WHERE project_id = ?",
+            (contract.project_id,),
+        ).fetchone()[0]
         conn.execute(
             "INSERT INTO commission_contracts (id, project_id, task_id, principal_id, contractor_id, "
             "value_type, contract_price, maximum_mint_value, acceptance_criteria_hash, status, "
             "evidence_hashes, approver_ids, verified_mint_value, row_sequence) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (contract.id, contract.project_id, contract.task_id, contract.principal_id,
+            (self._scope_id(contract.project_id, contract.id), contract.project_id,
+             contract.task_id, contract.principal_id,
              contract.contractor_id, contract.value_type.value, str(contract.contract_price),
              str(contract.maximum_mint_value), contract.acceptance_criteria_hash,
              contract.status.value, json.dumps(contract.evidence_hashes),
@@ -290,23 +329,27 @@ class TokenStore:
         )
 
     def _update_contract(self, conn, contract: CommissionContract):
+        stored_id = self._stored_contract_id(conn, contract.project_id, contract.id)
         conn.execute(
             "UPDATE commission_contracts SET status = ?, evidence_hashes = ?, approver_ids = ?, "
-            "verified_mint_value = ? WHERE id = ?",
+            "verified_mint_value = ? WHERE id = ? AND project_id = ?",
             (contract.status.value, json.dumps(contract.evidence_hashes),
              json.dumps(contract.approver_ids),
              str(contract.verified_mint_value) if contract.verified_mint_value is not None else None,
-             contract.id),
+             stored_id, contract.project_id),
         )
 
     def _insert_events(self, conn, events):
         for event in events:
             conn.execute(
-                "INSERT INTO ledger_events (sequence, id, project_id, kind, amount, source_id, "
+                "INSERT INTO ledger_events (id, project_id, kind, amount, source_id, "
                 "destination_id, task_id, contract_id, evidence_key, note) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (event.sequence, event.id, event.project_id, event.kind.value, str(event.amount),
-                 event.source_id, event.destination_id, event.task_id, event.contract_id,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (self._scope_id(event.project_id, event.id), event.project_id,
+                 event.kind.value, str(event.amount),
+                 event.source_id, event.destination_id, event.task_id,
+                  (self._stored_contract_id(conn, event.project_id, event.contract_id)
+                  if event.contract_id is not None else None),
                  event.evidence_key, event.note),
             )
 
@@ -349,10 +392,33 @@ class TokenStore:
             self._insert_events(conn, self._ledger.events[before:])
         return contract
 
+    def deliver_commission(self, contract_id: str, evidence_hashes) -> CommissionContract:
+        with self._write() as conn:
+            contract = self._ledger.deliver_commission(contract_id, evidence_hashes)
+            self._update_contract(conn, contract)
+        return contract
+
     def mint_direct(self, event_id, task_id, recipient_id, amount, evidence_hashes) -> LedgerEvent:
         with self._write() as conn:
             before = len(self._ledger.events)
             event = self._ledger.mint_direct(event_id, task_id, recipient_id, amount, evidence_hashes)
+            self._insert_events(conn, self._ledger.events[before:])
+        return event
+
+    def refund(self, event_id, source_id, amount, task_id, evidence_hashes,
+               note="dispute refund") -> LedgerEvent:
+        with self._write() as conn:
+            self._ledger._member(source_id)
+            self._ledger._task(task_id)
+            value = _amount(amount, "refund amount", allow_zero=False)
+            if self._ledger.balance(source_id) < value:
+                raise ValueError("insufficient token balance")
+            key = evidence_key(evidence_hashes)
+            before = len(self._ledger.events)
+            event = self._ledger._event(
+                event_id, LedgerEventType.REFUND, value, source_id,
+                self.project.treasury_id, task_id, None, key, note,
+            )
             self._insert_events(conn, self._ledger.events[before:])
         return event
 
@@ -376,9 +442,10 @@ class TokenStore:
                 contract_id, task_id, principal_id, contractor_id, amount, amount,
             )
             for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED,
-                           ContractStatus.CREDIT_RESERVED, ContractStatus.DELIVERED,
-                           ContractStatus.VERIFIED):
+                           ContractStatus.CREDIT_RESERVED):
                 self._ledger.advance_contract(contract_id, status)
+            self._ledger.deliver_commission(contract_id, evidence_hashes)
+            self._ledger.advance_contract(contract_id, ContractStatus.VERIFIED)
             mint, transfer = self._ledger.settle_commission(
                 contract_id, amount, evidence_hashes, approver_ids,
             )
@@ -407,9 +474,10 @@ class TokenStore:
             event = None
             if paid:
                 before = len(self._ledger.events)
-                event = self._ledger.transfer(
-                    f"{contribution_id}:refund", debtor_id, self.project.treasury_id,
-                    paid, task_id, evidence_hashes,
+                event = self._ledger._event(
+                    f"{contribution_id}:refund", LedgerEventType.REFUND, paid,
+                    debtor_id, self.project.treasury_id, task_id, None,
+                    evidence_key(evidence_hashes), "dispute refund",
                 )
                 self._insert_events(conn, self._ledger.events[before:])
             remaining = requested - paid
@@ -417,7 +485,8 @@ class TokenStore:
                 conn.execute(
                     "INSERT INTO reconciliation_debts (id, project_id, debtor_id, task_id, amount, remaining, reason) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (contribution_id, self.project.id, debtor_id, task_id,
+                    (self._scope_id(self.project.id, contribution_id), self.project.id,
+                     debtor_id, task_id,
                      str(requested), str(remaining), "resolved contribution score reduction"),
                 )
         return event, remaining
@@ -427,7 +496,8 @@ class TokenStore:
             if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reconciliation_debts'").fetchone():
                 return []
             return [
-                {"id": debt_id, "debtorId": debtor_id, "taskId": task_id,
+                {"id": self._unscope_id(debt_id, self.project.id),
+                 "debtorId": debtor_id, "taskId": task_id,
                  "amountExact": amount, "remainingExact": remaining, "reason": reason}
                 for debt_id, debtor_id, task_id, amount, remaining, reason in conn.execute(
                     "SELECT id, debtor_id, task_id, amount, remaining, reason FROM reconciliation_debts "
@@ -438,12 +508,13 @@ class TokenStore:
     def collect_debt(self, contribution_id):
         with self._write() as conn:
             row = conn.execute(
-                "SELECT debtor_id, task_id, remaining FROM reconciliation_debts WHERE id = ? AND project_id = ?",
-                (contribution_id, self.project.id),
+                "SELECT id, debtor_id, task_id, remaining FROM reconciliation_debts "
+                "WHERE id IN (?, ?) AND project_id = ?",
+                (contribution_id, self._scope_id(self.project.id, contribution_id), self.project.id),
             ).fetchone()
             if row is None:
                 raise ValueError("unknown reconciliation debt")
-            debtor_id, task_id, remaining_text = row
+            stored_id, debtor_id, task_id, remaining_text = row
             remaining = Decimal(remaining_text)
             paid = min(remaining, max(Decimal("0"), self._ledger.balance(debtor_id)))
             event = None
@@ -451,14 +522,18 @@ class TokenStore:
                 before = len(self._ledger.events)
                 count = sum(event.id.startswith(f"{contribution_id}:debt-payment:")
                             for event in self._ledger.events)
-                event = self._ledger.transfer(
-                    f"{contribution_id}:debt-payment:{count + 1}", debtor_id,
-                    self.project.treasury_id, paid, task_id,
-                    [f"legacy:{contribution_id}:debt-payment:{count + 1}"],
+                key = [f"legacy:{contribution_id}:debt-payment:{count + 1}"]
+                value = _amount(paid, "debt payment", allow_zero=False)
+                event = self._ledger._event(
+                    f"{contribution_id}:debt-payment:{count + 1}",
+                    LedgerEventType.REFUND, value, debtor_id, self.project.treasury_id,
+                    task_id, None, evidence_key(key), "reconciliation debt payment",
                 )
                 self._insert_events(conn, self._ledger.events[before:])
-                conn.execute("UPDATE reconciliation_debts SET remaining = ? WHERE id = ?",
-                             (str(remaining - paid), contribution_id))
+                conn.execute(
+                    "UPDATE reconciliation_debts SET remaining = ? WHERE id = ? AND project_id = ?",
+                    (str(remaining - paid), stored_id, self.project.id),
+                )
         return {"paidExact": str(paid), "remainingExact": str(remaining - paid),
                 "eventId": event.id if event else None}
 

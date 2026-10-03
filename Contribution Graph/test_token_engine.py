@@ -31,9 +31,12 @@ class TokenEngineTests(unittest.TestCase):
             ContractStatus.OFFERED,
             ContractStatus.ACCEPTED,
             ContractStatus.CREDIT_RESERVED,
-            ContractStatus.DELIVERED,
             ContractStatus.VERIFIED,
         ):
+            if status == ContractStatus.VERIFIED:
+                self.ledger.deliver_commission(contract.id, ["sha:delivered"])
+                self.ledger.advance_contract(contract.id, status)
+                continue
             self.ledger.advance_contract(contract.id, status)
         return contract
 
@@ -82,8 +85,11 @@ class TokenEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verified"):
             self.ledger.settle_commission(contract.id, "60", ["sha256:x"], ["charlie"])
         for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED,
-                       ContractStatus.CREDIT_RESERVED, ContractStatus.DELIVERED,
-                       ContractStatus.VERIFIED):
+                       ContractStatus.CREDIT_RESERVED, ContractStatus.VERIFIED):
+            if status == ContractStatus.VERIFIED:
+                self.ledger.deliver_commission(contract.id, ["sha:delivered"])
+                self.ledger.advance_contract(contract.id, status)
+                continue
             self.ledger.advance_contract(contract.id, status)
         with self.assertRaisesRegex(ValueError, "independently approve"):
             self.ledger.settle_commission(contract.id, "60", ["sha256:x"], ["alice"])
@@ -135,13 +141,14 @@ class TokenEngineTests(unittest.TestCase):
         self.assertIn("COMMISSIONED", edge_kinds)
         self.assertIn("EXECUTED", edge_kinds)
         self.assertIn("CONTRIBUTES_TO", edge_kinds)
+        self.assertIn("CREATED_VALUE", edge_kinds)
         self.assertIn("MINTED", edge_kinds)
-        self.assertIn("PAID", edge_kinds)
+        self.assertIn("SPLIT", edge_kinds)
         addresses = [node.address for node in graph.nodes]
         self.assertEqual(len(addresses), len(set(addresses)))
         self.assertTrue(all(address[:2] == ("cvn", "fintech") for address in addresses))
         minted = next(edge for edge in graph.edges if edge.kind == "MINTED")
-        paid = next(edge for edge in graph.edges if edge.kind == "PAID")
+        paid = next(edge for edge in graph.edges if edge.kind == "SPLIT")
         self.assertEqual((minted.amount, paid.amount), (Decimal("60"), Decimal("50")))
 
     def test_invalid_transition_is_rejected_without_mutation(self):

@@ -236,23 +236,35 @@ class TokenLedger:
 
     def advance_contract(self, contract_id: str, status: ContractStatus) -> CommissionContract:
         contract = self._contract(contract_id)
+        status = ContractStatus(status)
         allowed = {
             ContractStatus.DRAFT: {ContractStatus.OFFERED},
             ContractStatus.OFFERED: {ContractStatus.ACCEPTED},
             ContractStatus.ACCEPTED: {ContractStatus.CREDIT_RESERVED},
-            ContractStatus.CREDIT_RESERVED: {ContractStatus.DELIVERED},
+            ContractStatus.CREDIT_RESERVED: set(),
             ContractStatus.DELIVERED: {ContractStatus.VERIFIED, ContractStatus.DISPUTED},
             ContractStatus.VERIFIED: {ContractStatus.DISPUTED},
             ContractStatus.DISPUTED: {ContractStatus.FROZEN},
-            ContractStatus.FROZEN: {ContractStatus.DELIVERED},
+            ContractStatus.FROZEN: set(),
         }
-        status = ContractStatus(status)
         if status not in allowed.get(contract.status, set()):
             raise ValueError(f"invalid contract transition: {contract.status.value} -> {status.value}")
-        if contract.status == ContractStatus.FROZEN and status == ContractStatus.DELIVERED:
-            if self.task_budget(contract.task_id)["available"] < contract.maximum_mint_value:
-                raise ValueError("task mint cap cannot reserve this contract again")
+        if status == ContractStatus.VERIFIED and not contract.evidence_hashes:
+            raise ValueError("commission delivery evidence is required before verification")
         contract.status = status
+        return contract
+
+    def deliver_commission(self, contract_id: str, evidence_hashes) -> CommissionContract:
+        contract = self._contract(contract_id)
+        if contract.status not in {ContractStatus.CREDIT_RESERVED, ContractStatus.FROZEN}:
+            raise ValueError("only reserved or frozen commissions can be delivered")
+        if (contract.status == ContractStatus.FROZEN
+                and self.task_budget(contract.task_id)["available"] < contract.maximum_mint_value):
+            raise ValueError("task mint cap cannot reserve this contract again")
+        hashes = sorted(set(evidence_hashes))
+        evidence_key(hashes)
+        contract.evidence_hashes = hashes
+        contract.status = ContractStatus.DELIVERED
         return contract
 
     def mint_direct(self, event_id: str, task_id: str, recipient_id: str, amount, evidence_hashes) -> LedgerEvent:
@@ -298,7 +310,7 @@ class TokenLedger:
                            value, self.project.treasury_id, contract.principal_id, task.id,
                            contract.id, key, "commissioned production")
         transfer = LedgerEvent(next_sequence + 1, f"{contract.id}:payment", self.project.id,
-                               LedgerEventType.TRANSFER, payment, contract.principal_id,
+                               LedgerEventType.SPLIT, payment, contract.principal_id,
                                contract.contractor_id, task.id, contract.id, key,
                                "atomic commission payment")
         if mint.id in self._event_ids or transfer.id in self._event_ids:
@@ -308,7 +320,7 @@ class TokenLedger:
         self._minted_evidence.add(key)
         self._minted_by_task[task.id] = self._minted_by_task.get(task.id, ZERO) + value
         self._settled_contracts.add(contract.id)
-        contract.evidence_hashes = sorted(set(evidence_hashes))
+        contract.evidence_hashes = sorted(set(contract.evidence_hashes) | set(evidence_hashes))
         contract.approver_ids = approvers
         contract.verified_mint_value = value
         contract.status = ContractStatus.SETTLED
@@ -342,8 +354,9 @@ class TokenLedger:
         reason = reason.strip()
         for sequence in sequences:
             target = self._event_by_sequence(sequence)
-            if target.kind not in (LedgerEventType.MINT, LedgerEventType.TRANSFER):
-                raise ValueError("only MINT or TRANSFER events can be frozen")
+            if target.kind not in (LedgerEventType.MINT, LedgerEventType.TRANSFER,
+                                   LedgerEventType.SPLIT):
+                raise ValueError("only MINT, TRANSFER, or SPLIT events can be frozen")
             frozen = self._frozen_events.setdefault(sequence, set())
             if frozen:
                 continue
@@ -433,7 +446,7 @@ class TokenLedger:
             if event.kind in {LedgerEventType.MINT, LedgerEventType.RELEASE}:
                 supply += event.amount
             elif event.kind == LedgerEventType.FREEZE or (
-                event.kind == LedgerEventType.TRANSFER
+                event.kind in {LedgerEventType.TRANSFER, LedgerEventType.REFUND}
                 and event.destination_id == self.project.treasury_id
             ):
                 supply -= event.amount
@@ -483,15 +496,46 @@ class TokenLedger:
                 GraphEdge(prefix + ("edge", "relates-to", contract.id), "CONTRIBUTES_TO",
                           contract_addr, task_addr),
             ))
+            if contract.verified_mint_value is not None:
+                edges.append(GraphEdge(
+                    prefix + ("edge", "created-value", contract.id), "CREATED_VALUE",
+                    contractor_addr, task_addr, contract.verified_mint_value,
+                ))
+            for approver_id in contract.approver_ids:
+                edges.append(GraphEdge(
+                    prefix + ("edge", "approved", contract.id, approver_id), "APPROVED",
+                    prefix + ("member", approver_id), contract_addr,
+                ))
+            if contract.status in {ContractStatus.DISPUTED, ContractStatus.FROZEN}:
+                edges.append(GraphEdge(
+                    prefix + ("edge", contract.status.value.lower(), contract.id),
+                    contract.status.value, contract_addr, task_addr,
+                ))
         for event in self.events:
             if event.kind in (LedgerEventType.FREEZE, LedgerEventType.RELEASE):
+                edges.append(GraphEdge(
+                    prefix + ("edge", event.kind.value.lower(), event.id),
+                    "FROZEN" if event.kind == LedgerEventType.FREEZE else "RELEASED",
+                    prefix + ("member", event.source_id or ""),
+                    prefix + ("task", event.task_id), event.amount,
+                ))
                 continue
             source = treasury_addr if event.source_id == self.project.treasury_id else prefix + ("member", event.source_id or "")
             destination = (treasury_addr if event.destination_id == self.project.treasury_id
                            else prefix + ("member", event.destination_id or ""))
+            edge_kind = {
+                LedgerEventType.MINT: "MINTED",
+                LedgerEventType.SPLIT: "SPLIT",
+                LedgerEventType.REFUND: "REFUNDED",
+            }.get(event.kind, "PAID")
             edges.append(GraphEdge(prefix + ("edge", event.kind.value.lower(), event.id),
-                                   "MINTED" if event.kind == LedgerEventType.MINT else "PAID",
+                                   edge_kind,
                                    source, destination, event.amount))
+            if event.kind == LedgerEventType.MINT and event.contract_id is None:
+                edges.append(GraphEdge(
+                    prefix + ("edge", "created-value", event.id), "CREATED_VALUE",
+                    destination, prefix + ("task", event.task_id), event.amount,
+                ))
         return ContributionGraph(tuple(nodes[key] for key in sorted(nodes)), tuple(edges))
 
     def _validate_mint(self, task: TokenTask, value: Decimal, key: str) -> None:

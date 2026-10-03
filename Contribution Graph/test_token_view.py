@@ -78,7 +78,7 @@ class TokenViewTests(unittest.TestCase):
             self.assertEqual(contract["approverIds"], ["charlie"])
             kinds = [event["kind"] for event in view["events"]]
             self.assertEqual(kinds.count("MINT"), 3)
-            self.assertEqual(kinds.count("TRANSFER"), 1)
+            self.assertEqual(kinds.count("SPLIT"), 1)
 
     def test_pending_and_disputed_are_skipped(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -124,7 +124,8 @@ class TokenViewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "data.sqlite3"
             build(path)
-            with TestClient(create_app(path)) as client:
+            with TestClient(create_app(path, token_admin_key="test-key"),
+                            headers={"X-Token-Admin-Key": "test-key"}) as client:
                 response = client.get("/api/projects/fintech/token-view")
                 self.assertEqual(response.status_code, 200)
                 view = response.json()

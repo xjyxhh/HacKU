@@ -103,3 +103,16 @@ WHEN (NEW.kind = 'MINT' AND (
     WHERE p.id = NEW.project_id AND m.value = NEW.source_id
 ))
 BEGIN SELECT RAISE(ABORT, 'ledger event member is not in token project'); END;
+
+CREATE TRIGGER IF NOT EXISTS token_split_refund_members BEFORE INSERT ON ledger_events
+WHEN (NEW.kind = 'SPLIT' AND (
+    NOT EXISTS (SELECT 1 FROM token_projects AS p, json_each(p.member_ids) AS m
+                WHERE p.id = NEW.project_id AND m.value = NEW.source_id)
+    OR NOT EXISTS (SELECT 1 FROM token_projects AS p, json_each(p.member_ids) AS m
+                   WHERE p.id = NEW.project_id AND m.value = NEW.destination_id)
+)) OR (NEW.kind = 'REFUND' AND (
+    NEW.destination_id IS NOT (SELECT treasury_id FROM token_projects WHERE id = NEW.project_id)
+    OR NOT EXISTS (SELECT 1 FROM token_projects AS p, json_each(p.member_ids) AS m
+                   WHERE p.id = NEW.project_id AND m.value = NEW.source_id)
+))
+BEGIN SELECT RAISE(ABORT, 'split or refund member is not in token project'); END;

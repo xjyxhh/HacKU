@@ -29,7 +29,7 @@ const I18n = (() => {
     // Review page
     "证据 / 同伴验证 / 争议处理": "Evidence / Peer Review / Disputes",
     "审核摘要": "Review Summary",
-    "当前操作成员": "Acting Member", "演示身份选择，尚未接入登录": "Demo Identity Selector; Sign-In Is Not Connected",
+    "当前操作成员": "Acting Member", "审核身份来自当前登录账号": "Review identity comes from the signed-in account",
     "已验证和已解决的贡献": "Verified and Resolved Contributions",
     "确认或调整后开始计分": "Scores Count After Confirmation or Adjustment",
     "解决前暂停计分": "Scoring Paused Until Resolution",

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#103c3d">
+  <title>Contribution Graph · Profile</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/auth.css">
+  <script src="/auth.js" defer></script>
+  <script src="/profile.js" defer></script>
+</head>
+<body hidden>
+  <main class="auth-shell">
+    <header class="auth-brand"><a href="/workspace.html"><span class="brand-mark" aria-hidden="true">CG</span></a><span>Contribution Graph</span></header>
+    <section class="panel auth-panel">
+      <p class="kicker">USER PROFILE</p>
+      <h1>个人资料</h1>
+      <div id="error" class="error" role="alert" hidden></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <form id="profile-form" class="auth-form">
+        <label>显示名称<input name="display_name" required maxlength="120"></label>
+        <label>邮箱<input name="email" type="email" required maxlength="320"></label>
+        <label>简介<textarea name="bio" rows="3" maxlength="2000"></textarea></label>
+        <label>头像链接<input name="avatar_url" type="url" maxlength="2048"></label>
+        <label>钱包地址（可选）<input name="wallet_address" maxlength="256"></label>
+        <button type="submit">保存 Profile</button>
+      </form>
+      <p class="section-note">项目数：<strong id="project-count">—</strong> · 钱包暂作身份资料，不触发链上操作。</p>
+      <a class="nav-link" href="/workspace.html">返回我的项目</a>
+    </section>
+  </main>
+</body>
+</html>

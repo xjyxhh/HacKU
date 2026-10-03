@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE TABLE IF NOT EXISTS project_members (
     project_id TEXT NOT NULL REFERENCES projects(id),
     member_id TEXT NOT NULL REFERENCES members(id),
+    role TEXT NOT NULL DEFAULT 'MEMBER'
+        CHECK (role IN ('OWNER', 'MEMBER', 'VERIFIER', 'VIEWER')),
     PRIMARY KEY (project_id, member_id)
 );
 

@@ -24,6 +24,10 @@
 .token-form-grid .token-form{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;margin:0}
 .balance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 24px}
 .balance-row{display:flex;justify-content:space-between;gap:12px;padding:15px 0;border-bottom:1px solid var(--line);font-size:13px}
+.balance-row{display:block}
+.balance-row summary{display:flex;justify-content:space-between;gap:12px;cursor:pointer}
+.balance-row p{margin:10px 0 0;color:var(--muted);font-size:12px}
+.balance-row ul{margin:8px 0 0;padding-left:20px;font-size:12px}
 .balance-row strong,.event-amount{font-variant-numeric:tabular-nums;font-size:18px}
 #debt-list button{min-height:34px;padding:0 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:#fff;font-size:12px;font-weight:700}
 .token-list{display:grid;gap:0}

@@ -84,6 +84,15 @@ class ContributionStore:
                 raise ValueError(f"no contribution data in {self.path}")
             if not read_only and not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'").fetchone():
                 conn.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
+            if not read_only:
+                membership_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(project_members)")
+                }
+                if "role" not in membership_columns:
+                    conn.execute(
+                        "ALTER TABLE project_members ADD COLUMN role TEXT NOT NULL "
+                        "DEFAULT 'MEMBER' CHECK (role IN ('OWNER', 'MEMBER', 'VERIFIER', 'VIEWER'))"
+                    )
             conn.execute("BEGIN")
             self._load(conn)
 
@@ -103,8 +112,16 @@ class ContributionStore:
         # ponytail: Load the small local dataset as objects; query per project if it grows.
         self.projects = {id: Project(id, name) for id, name in conn.execute("SELECT id, name FROM projects ORDER BY rowid")}
         self.members = {id: Member(id, name) for id, name in conn.execute("SELECT id, name FROM members ORDER BY rowid")}
-        for project_id, member_id in conn.execute("SELECT project_id, member_id FROM project_members ORDER BY rowid"):
+        membership_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(project_members)")
+        }
+        role_column = "role" if "role" in membership_columns else "'MEMBER'"
+        self.membership_roles = {}
+        for project_id, member_id, role in conn.execute(
+            f"SELECT project_id, member_id, {role_column} FROM project_members ORDER BY rowid"
+        ):
             self.projects[project_id].member_ids.append(member_id)
+            self.membership_roles[(project_id, member_id)] = role
         self.tasks = {}
         for id, project_id, name, value, description in conn.execute(
             "SELECT id, project_id, name, task_value, description FROM tasks ORDER BY rowid"
@@ -162,27 +179,75 @@ class ContributionStore:
                 raise ValueError("reviewer cannot verify their own contribution")
 
     @_write
-    def create_project(self, project_id, name):
+    def create_project(self, project_id, name, owner_member_id=None):
         if not project_id.strip() or not name.strip() or project_id in self.projects:
             raise ValueError("project id must be new and name must be nonempty")
+        if owner_member_id is not None and owner_member_id not in self.members:
+            raise ValueError("project owner must be an existing member")
         project = Project(project_id, name)
         self._conn.execute("INSERT INTO projects (id, name) VALUES (?, ?)", (project_id, name))
+        if owner_member_id is not None:
+            self._conn.execute(
+                "INSERT INTO project_members (project_id, member_id, role) VALUES (?, ?, 'OWNER')",
+                (project_id, owner_member_id),
+            )
+            project.member_ids.append(owner_member_id)
+            self.membership_roles[(project_id, owner_member_id)] = "OWNER"
         return project
 
     @_write
-    def add_member(self, project_id, member_id, name):
+    def add_member(self, project_id, member_id, name, role="MEMBER"):
         project = self._project(project_id)
         if not member_id.strip() or not name.strip() or member_id in project.member_ids:
             raise ValueError("member id must be new and name must be nonempty")
+        if role not in {"OWNER", "MEMBER", "VERIFIER", "VIEWER"}:
+            raise ValueError("unknown project role")
         member = self.members.get(member_id)
         if member is None:
             member = Member(member_id, name)
             self._conn.execute("INSERT INTO members (id, name) VALUES (?, ?)", (member_id, name))
         elif member.name != name:
             raise ValueError("existing member id has a different name")
-        self._conn.execute("INSERT INTO project_members (project_id, member_id) VALUES (?, ?)",
-                           (project.id, member_id))
+        self._conn.execute(
+            "INSERT INTO project_members (project_id, member_id, role) VALUES (?, ?, ?)",
+            (project.id, member_id, role),
+        )
         return member
+
+    @_write
+    def add_existing_member(self, project_id, member_id, role="MEMBER"):
+        project = self._project(project_id)
+        if member_id not in self.members:
+            raise ValueError(f"unknown member {member_id}")
+        if member_id in project.member_ids:
+            raise ValueError("member is already part of the project")
+        if role not in {"OWNER", "MEMBER", "VERIFIER", "VIEWER"}:
+            raise ValueError("unknown project role")
+        self._conn.execute(
+            "INSERT INTO project_members (project_id, member_id, role) VALUES (?, ?, ?)",
+            (project.id, member_id, role),
+        )
+        return self.members[member_id]
+
+    @_write
+    def set_member_role(self, project_id, member_id, role):
+        project = self._project(project_id)
+        if member_id not in project.member_ids:
+            raise ValueError(f"member {member_id} is not part of the project")
+        if role not in {"OWNER", "MEMBER", "VERIFIER", "VIEWER"}:
+            raise ValueError("unknown project role")
+        owners = self._conn.execute(
+            "SELECT COUNT(*) FROM project_members WHERE project_id = ? AND role = 'OWNER'",
+            (project_id,),
+        ).fetchone()[0]
+        if (owners == 1 and self.membership_roles[(project_id, member_id)] == "OWNER"
+                and role != "OWNER"):
+            raise ValueError("a project must keep at least one owner")
+        self._conn.execute(
+            "UPDATE project_members SET role = ? WHERE project_id = ? AND member_id = ?",
+            (role, project_id, member_id),
+        )
+        return self.members[member_id]
 
     @_write
     def add_task(self, project_id, task_id, name, task_value, description=""):
@@ -512,9 +577,10 @@ class ContributionStore:
         principal, contractor = contribution.helped_member_id, contribution.contributor_id
         key = [f"legacy:{contribution.id}"]
         ledger.create_commission(contract_id, contribution.task_id, principal, contractor, amount, amount)
-        for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED, ContractStatus.CREDIT_RESERVED,
-                       ContractStatus.DELIVERED, ContractStatus.VERIFIED):
+        for status in (ContractStatus.OFFERED, ContractStatus.ACCEPTED, ContractStatus.CREDIT_RESERVED):
             ledger.advance_contract(contract_id, status)
+        ledger.deliver_commission(contract_id, key)
+        ledger.advance_contract(contract_id, ContractStatus.VERIFIED)
         ledger.settle_commission(contract_id, amount, key,
                                  [self._legacy_token_approver(contribution)])
 
@@ -525,9 +591,12 @@ class ContributionStore:
         for event in ledger.events:
             if event.kind == LedgerEventType.MINT:
                 minted[event.destination_id] += event.amount
-            elif event.kind == LedgerEventType.TRANSFER:
-                paid[event.source_id] += event.amount
-                received[event.destination_id] += event.amount
+            elif event.kind in (LedgerEventType.TRANSFER, LedgerEventType.SPLIT,
+                                LedgerEventType.REFUND):
+                if event.source_id in paid:
+                    paid[event.source_id] += event.amount
+                if event.destination_id in received:
+                    received[event.destination_id] += event.amount
         graph = ledger.graph()
         return {
             "project": {"id": project.id, "name": project.name,

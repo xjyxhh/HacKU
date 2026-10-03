@@ -43,9 +43,12 @@ class TokenStoreTests(unittest.TestCase):
             ContractStatus.OFFERED,
             ContractStatus.ACCEPTED,
             ContractStatus.CREDIT_RESERVED,
-            ContractStatus.DELIVERED,
             ContractStatus.VERIFIED,
         ):
+            if status == ContractStatus.VERIFIED:
+                store.deliver_commission(contract_id, ["sha:delivered"])
+                store.advance_contract(contract_id, status)
+                continue
             store.advance_contract(contract_id, status)
         return store.ledger.contracts[contract_id]
 
@@ -138,9 +141,23 @@ class TokenStoreTests(unittest.TestCase):
         self.assertEqual(contract.verified_mint_value, Decimal("60"))
         self.assertEqual(contract.approver_ids, ["charlie"])
         self.assertEqual(contract.evidence_hashes, ["sha:delivered"])
+        self.assertEqual(reopened.ledger.events[-1].kind, LedgerEventType.SPLIT)
         # A settled contract cannot be settled again, even after replay.
         with self.assertRaises(ValueError):
             reopened.settle_commission("commission-1", "60", ["sha:other"], ["david"])
+
+    def test_refund_is_a_distinct_event_and_survives_reopen(self):
+        store = self.new_store()
+        store.mint_direct("mint", "recommendation", "alice", "40", ["sha:mint"])
+        event, remaining = store.reconcile_refund(
+            "dispute-1", "alice", "recommendation", "12", ["sha:refund"],
+        )
+        self.assertEqual(event.kind, LedgerEventType.REFUND)
+        self.assertEqual(remaining, Decimal("0"))
+        reopened = self.open_store()
+        self.assertEqual(reopened.balance("alice"), Decimal("28"))
+        self.assertEqual(reopened.total_supply(), Decimal("28"))
+        self.assertEqual(reopened.ledger.events[-1].kind, LedgerEventType.REFUND)
 
     def test_failed_write_leaves_file_and_memory_unchanged(self):
         store = self.new_store()
@@ -225,11 +242,36 @@ class TokenStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TokenStore(self.db)
 
-    def test_create_project_rejects_any_existing_ledger(self):
+    def test_create_project_allows_other_projects_but_rejects_duplicate_project_id(self):
         self.new_store()
         other = TokenProject("other", "Other", "treasury", ("alice", "bob"))
+        TokenStore(self.db, other)
         with self.assertRaises(ValueError):
             TokenStore(self.db, other)
+        with self.assertRaisesRegex(ValueError, "project id is required"):
+            TokenStore(self.db)
+
+    def test_project_ledgers_are_isolated_with_reused_local_identifiers(self):
+        first = TokenStore(
+            self.db, TokenProject("first", "First", "first-treasury", ("alice",))
+        )
+        first.add_task(TokenTask("task", "first", "Task", ValueType.CORE,
+                                 Decimal("20"), "Acceptance"))
+        first.mint_direct("mint", "task", "alice", "10", ["first-proof"])
+
+        second = TokenStore(
+            self.db, TokenProject("second", "Second", "second-treasury", ("alice",))
+        )
+        second.add_task(TokenTask("task", "second", "Task", ValueType.CORE,
+                                  Decimal("20"), "Acceptance"))
+        second.mint_direct("mint", "task", "alice", "5", ["second-proof"])
+
+        first_reopened = TokenStore(self.db, project_id="first")
+        second_reopened = TokenStore(self.db, project_id="second")
+        self.assertEqual(first_reopened.balance("alice"), Decimal("10"))
+        self.assertEqual(second_reopened.balance("alice"), Decimal("5"))
+        self.assertEqual(first_reopened.ledger_payload()["events"][0]["sequence"], 1)
+        self.assertEqual(second_reopened.ledger_payload()["events"][0]["sequence"], 1)
 
     def test_ledger_payload_shape(self):
         store = self.new_store()
