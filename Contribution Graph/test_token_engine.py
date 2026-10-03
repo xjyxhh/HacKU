@@ -3,7 +3,7 @@
 import unittest
 from decimal import Decimal
 
-from token_engine import (
+from contribution_engine import (
     ContractStatus,
     ProductionMode,
     TokenLedger,
