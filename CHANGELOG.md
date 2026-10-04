@@ -1,86 +1,78 @@
-# 修改日志
+# Change log
 
-## 2026-10-04 · 账号、工作区、项目角色与 Token 图融合
+## 2026-10-04 · Project rename and English interface
 
-- 增加公开注册、可选 SMTP 邮箱验证、个人资料与邮箱变更验证；继续支持成员 ID 登录和原 12 小时会话。
-- 增加本人项目工作区、自助建项并成为 Owner、已有账号邀请及角色审计/最后 Owner 保护；Token 账本仍按项目独立存储。
-- 增加合同交付证据事务、当事人分阶段操作、独立核验及真实批准结算，保留争议冻结、退款与拆分路径。
-- 增加只读固定公开 Demo、四类 Token 图视图及新页面入口；补充账号、角色、Demo 和账本边界文档。
-- 更新 GitHub 首页文档，补充注册、工作区、公开 Demo 的在线入口与 PocketBay 数据持久化注意事项。
-- 自动 SMTP 投递需要部署环境配置；本地浏览器路径、窄屏/键盘/主题验收、生产备份及恢复演练需在后续启动服务和部署窗口完成。
+- Based on remote main 0855fbe, rename the application to group contribution ledger and update directory references and deployment packaging.
+- Convert repository documents, source messages, sample data, and code/Markdown filenames to English. Replace bilingual presentation with a fixed English interface.
+- Preserve remote account, workspace, role, Token, and lifecycle functionality. Local outcome/value-ledger changes remain in a separate checkpoint branch.
 
-## 2026-10-03 · 完成成员撤回与项目生命周期 / Withdrawal and project lifecycle
+## 2026-10-04 · Accounts, workspace, project roles, and Token graph integration
 
-- 新增可重复建表的生命周期、成员状态、撤回申请、退出申请、审计事件与 outbox 表。
-- 增加贡献撤回申请/审批、成员退出预览/申请/审批，以及项目归档预览、归档、恢复接口；归档只隐藏并封锁写入，不物理删除。
-- 看板对已撤回贡献显示零有效分数并保留历史记录，根页面不再硬编码 `fintech`。
-- 每个项目使用 SHA-256 命名的独立 Token 账本；旧单账本经 SQLite Backup API 迁移并保留原文件。/ Each project uses an isolated SHA-256 named ledger; the old ledger is copied and retained.
-- 撤回和退出的 Token 调和会回收可用余额、登记具名债务，并允许管理员幂等重试。/ Withdrawal and exit recover available Tokens, record named debt, and support idempotent administrator retries.
-- 看板提供退出及归档预览、待调和账务和已归档项目恢复；Token 工作台跟随当前项目。/ The dashboard shows exit and archive previews, pending accounting, and recovery controls; the Token workbench follows the selected project.
+- Add public registration, optional SMTP verification, profile/email-change verification, member-ID login, and existing 12-hour sessions.
+- Add personal workspace, self-created Owner projects, existing-account invitations, role audit, and last-Owner protection; retain independent project ledgers.
+- Add transactional delivery evidence, party-specific advancement, independent verification, and real approval-based settlement; retain freezes/refunds/splits.
+- Add fixed read-only public demo, four graph views, and account/role/demo/ledger documentation.
+- Update online entry links and PocketBay persistence guidance. SMTP needs deployment configuration; browser/responsive/keyboard/theme acceptance and production backup/recovery require later deployment checks.
 
-## 2026-10-03 · 项目说明与使用流程
+## 2026-10-03 · Withdrawal and project lifecycle
 
-- 扩充根目录 README：说明项目定位、看板与审核流程、Token 工作台、首次启动、管理员密钥、数据备份和测试方法。
-- 修正 API 示例的管理员密钥请求头，并在使用说明中明确贡献库与 Token 账本分别存储、需要补同步的场景。
+- Add idempotent lifecycle, membership, withdrawal/exit request, audit, and outbox tables.
+- Add withdrawal decisions, exit preview/request/decision, and archive preview/archive/restore. Archival hides projects and stops writes without deleting data.
+- Show zero effective score for withdrawn records and retain history; remove fixed fintech assumptions.
+- Use independent SHA-256 named project ledgers; copy the legacy ledger using SQLite Backup API and retain it.
+- Recover available Tokens, record named debt, allow idempotent retry, and expose previews/pending accounting/restoration in Dashboard.
 
-## 2026-10-03 · 对抗式审查修复
+## 2026-10-03 · Usage documentation
 
-- Token 写接口及账本启用后的贡献写接口加入管理员密钥；任务价值和证据输入设置上限。
-- 修复账本初始化竞争、只读请求写锁、委托结算部分提交、SUPPORT 争议冻结对象与重复冻结；余额不足的降额回收记录待追偿债务。
-- JSON 快照可携带 Token 账本并原子导出；导入校验数值和成员关系；迁移在已验证贡献无法映射时失败，并使用精确 Decimal 校验守恒。
-- 增加对并发建账、缺损账本、结算回滚、委托冻结、债务追偿和快照往返的回归测试。
+- Expand README with positioning, Dashboard/review/Token workflows, initial startup/admin key, backups, and tests.
+- Correct the former administrator-header example and document separate databases/reconciliation.
 
-## 2026-10-03 · Token 账本与工作台接入
+## 2026-10-03 · Adversarial fixes
 
-- 新增独立的 `token.sqlite3` 持久账本、任务预算、直接铸币、转账、委托合约、冻结与释放及相关 API。
-- 加入从已核验旧贡献迁移账本的工具，并把旧贡献审核与 Token 铸币、争议冻结、释放和补同步连接起来。
-- 新增 Token 工作台，可管理项目账本、预算和合约，查看余额、事件和协作关系图。
-- 看板在项目匹配账本时显示持久 Token 余额与旧贡献分对照；增加账本及 API 测试。
+- Protect Token and ledger-enabled contribution writes with the then-current administrator key; bound task/evidence input.
+- Fix initialization races, read-only locking, partial settlement, SUPPORT freeze targeting/repeated freezing, and record shortfall recovery debt.
+- Atomically export ledger snapshots, validate numeric/member references, fail unmappable verified migration, and check Decimal conservation.
+- Add concurrency, damaged-ledger, rollback, commission-freeze, debt, and snapshot-roundtrip regressions.
 
-## 2026-10-03 · 阶段一：Token 引擎只读投影
+## 2026-10-03 · Persistent Token workspace
 
-- 新增 `ContributionStore.token_view(project_id)`：把既有贡献数据只读投影成 Token 账本（余额、委托合约、账本事件、关系图），不写库、不改表。
-- 投影规则：`CORE`/`REVIEW`/`COORDINATION` 的旧得分作为直接铸币；`SUPPORT` 还原为委托合约（委托人 = 受帮助成员，执行人 = 贡献者）；`PENDING`/`DISPUTED` 与无法结算的记录列入 `skipped`。
-- `dashboard_data()` 追加 `balances` 字段（旧字段全部保留）；新增只读接口 `GET /api/projects/{project_id}/token-view` 与命令行 `token-view`。
-- 新增 `token_projection_demo.py`，在同一份数据上对照旧分数与新余额，并检查 `sum(balance) == totalSupply == oldTeamTotal`。
-- 新增 `test_token_view.py`（8 项）：守恒、只读、SUPPORT 合约映射、跳过规则、2 人项目降级、Dashboard 字段与 API。
-- 新增 [融合指南.md](融合指南.md)，记录概念映射、融合陷阱、已知代码缺口与后续三阶段路线。全量测试 57 项通过。
+- Add token.sqlite3, budgets, direct mints, transfers, commissions, freeze/release APIs, legacy migration, and review-driven synchronization.
+- Add workspace balance/event/graph controls and Dashboard persistent-balance/previous-score comparison tests.
 
-## 2026-10-03 · 看板录入、贡献审核与分支合并
+## 2026-10-03 · Phase one read-only projection
 
-- 看板新增录入功能：可创建或切换项目、添加成员与任务、提交四类贡献；提交后立即重新读取 SQLite，并以「待验证」状态显示，得分为 0。
-- 重设计贡献关系图，改为「成员 → 贡献 → 任务」分层布局，以虚线区分受帮助成员，并与明细、成员和任务筛选联动。
-- 页头加入中英双语切换（选择保存在浏览器），默认读取 `fintech` 项目，刷新后保留当前项目、筛选与选中的贡献。
-- 新增 B 端贡献审核页面 `dashboard/review.html`：查看待办与详情、添加 `NOTE`/`URL`/`IMAGE`/`GITHUB_PR` 证据、确认或调整分值、提出与解决争议，并保留完整处理记录。
-- 新增 `POST /api/contributions/{id}/preview` 与 `ContributionStore.preview_score()`，提供只计算、不保存的分数预览；详情接口补充 `currentScore` 与 `proposedScore`，避免把待验证的 0 分当成提议分值。
-- 新增 `GET /api/projects` 供页面列出可切换项目；审核写入后通过 `localStorage` 信号通知同源看板自动刷新。
-- 合并 `feature/contribution-review` 分支（`482dbf6`）：解决与主线的冲突，并把该分支基于旧 JSON 存储的说明与示例改写到 SQLite 版本。合并后 38 项自动化测试全部通过。
+- Add token_view() producing balances/contracts/events/graph without writes/schema changes. Map direct types to mints and SUPPORT to commissions; skip unverified/unsettleable records.
+- Add Dashboard balances, read-only HTTP/CLI access, comparison script, and eight projection tests. Historical full suite: 57 passing tests.
+- Add integration-guide.md with mappings, pitfalls, gaps, and roadmap.
 
-## 2026-10-03 · 数据统一与看板完善
+## 2026-10-03 · Dashboard entry, review, and branch merge
 
-- 将本地存储迁移至 SQLite，新增关系表、外键、事务写入、JSON 导入与导出工具，以及迁移测试。
-- 将原先两份数据合并为单一 `data.sqlite3`；保留所有 6 条贡献、核验和争议记录，并把冲突的 Alice 贡献编号 `c1` 改为 `merged-c1`。更新 `data.json` 快照，移除单独的 `demo.json`。
-- 网站和命令行默认读取同一数据库，网站统一使用本机 8000 端口；支持通过 API 读取与修改贡献数据。
-- 重设计 C 看板，加入成员、任务、类型、状态筛选及排序；贡献明细与关系图联动，平行帮助关系分别显示。
-- 补充仓库指南、启动说明、合并与快照工具，以及针对数据合并和 API 的测试。
+- Add project/member/task/contribution forms and pending zero-score records; redesign layered member → contribution → task graph with dashed helped-member edges and synchronized filters.
+- Add the historical bilingual switch, persisted project/filter/focus, review/evidence/adjustment/dispute/resolution page, preview API, currentScore/proposedScore, project listing, and same-origin refresh signal.
+- Merge feature/contribution-review (482dbf6), resolve conflicts, and adapt JSON examples to SQLite. Historical full suite: 38 passing tests.
 
-## 2026-10-03 · FastAPI 服务（`f863ff9`）
+## 2026-10-03 · Unified data and Dashboard
 
-- 将原网页服务改为 FastAPI，提供项目、成员、任务、贡献、证据、核验和争议处理接口。
-- 增加 API 测试和依赖清单，保留静态看板页面。
+- Migrate to relational SQLite with constraints, transactions, JSON tools, and tests.
+- Merge two databases while retaining six contributions/reviews/disputes; rename Alice's colliding c1 to merged-c1, refresh data.json, and remove demo.json.
+- Share default database/port 8000, add API read/write, filters/sorting/detail-graph synchronization, and parallel help relationships.
 
-## 2026-10-03 · Contribution Graph 初版（`bf4c6f5`）
+## 2026-10-03 · FastAPI service (f863ff9)
 
-- 加入贡献评分模型、本地存储、命令行、完整流程示例和单元测试。
-- 加入项目看板、帮助关系图、项目说明及 B/C 交接文档。
+- Replace the earlier web service with FastAPI contribution/evidence/review/dispute APIs; add tests and requirements while retaining static Dashboard.
 
-## 2026-10-02 · 仓库初始化（`237c9b1`）
+## 2026-10-03 · Initial application (bf4c6f5)
 
-- 创建仓库与初始 README。
-# 未发布
+- Add scoring models, local store, CLI, workflow demo, tests, Dashboard/help graph, documentation, and B/C handoff.
 
-- 增加成员身份表、一次性 scrypt 引导文件命令、会话 Cookie 与 CSRF 校验、成员邀请兑换及项目管理员任命接口。
-- 为 PocketBay 部署启用 Secure Cookie；登录与邀请兑换按服务端来源限速，并修复 `/api/` 尾斜线路径。
-- 三个前端页面改用登录会话请求，移除 `TOKEN_ADMIN_KEY` 浏览器提示；增加项目邀请入口、密码兑换页和公平规则说明页。
-- 增加真实 `contract_approvals`、合约 `RESOLVED` 状态迁移、争议冻结、追加式 `REFUND` / `SPLIT` 账本和结案记录；退款不增加铸币量。
-- 增加多案例演示脚本、认证与合约终局 HTTP/持久化测试，并更新公平规则和融合指南。
+## 2026-10-02 · Repository initialization (237c9b1)
+
+- Create repository and initial README.
+
+## Previously recorded unreleased authentication and dispute work
+
+- Add account tables, scrypt seed command, session/CSRF, one-use invitations, and project-admin appointment.
+- Enable Secure cookies for PocketBay, trusted-source login/invitation rate limits, and correct /api/ handling.
+- Replace browser TOKEN_ADMIN_KEY prompts with member sessions; add invitation/password/fairness pages.
+- Add real contract_approvals, RESOLVED migration, contract freezes, append-only REFUND/SPLIT, and resolution records without extra minting.
+- Add isolated multi-case seed data and HTTP/persistence tests; update rules/integration docs.

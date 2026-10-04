@@ -1,123 +1,107 @@
-# HacKU · Contribution Graph
+# group contribution ledger
 
-## 撤回与项目生命周期 / Withdrawal and project lifecycle
+A local web application for recording team contributions, independent peer review, and collaboration. It was developed for the HacKU 2026 prototype demonstration. The legacy workflow scores CORE, SUPPORT, REVIEW, and COORDINATION contributions. Pending and disputed records do not count toward scores. Verified value can enter an independent project Token ledger.
 
-贡献撤回采用申请与独立成员审批。批准后有效分数归零，原贡献、证据与审核历史仍保留；Token 回收额与未收回欠额应分别核对，欠额不代表已追回。项目“删除”是可恢复归档，归档会隐藏公开项目并拒绝写入，不会物理删除数据。/ Contribution withdrawal requires an independent member decision. Approval sets the effective score to zero while preserving contribution, evidence, and review history. Recovered Tokens and outstanding debt must be distinguished. Project deletion means recoverable archival: archived projects are hidden from public listings and reject writes; records are retained.
+## Access
 
-当前实现 / Current implementation: 站点管理员创建项目后会初始化独立 Token 账本，但不会自动成为项目成员；成员只有被加入项目后才出现在项目看板和 Token 账本中。旧单账本经校验后复制到 `Contribution Graph/token-ledgers/<项目 ID 完整 SHA-256>.sqlite3`，旧 `/api/token/...` 仅作为原项目兼容入口。看板与 Token 工作台均可切换项目，撤回与退出按项目账本回收 Token 或登记具名欠额；管理员可查看待同步账务并重试。/ A site administrator creates an isolated project ledger without being added as a project member. Members appear in a project dashboard and Token ledger only after they join the project. The legacy ledger is copied and verified under the full SHA-256 project path; old `/api/token/...` routes remain aliases for the original project. The dashboard and Token workbench select projects; withdrawal and exit recover available Tokens or record named debt, with an administrator retry view.
+[Live application](https://hacku.pocketbay.app) · [Register](https://hacku.pocketbay.app/register.html) · [My workspace](https://hacku.pocketbay.app/workspace.html) · [Public demo](https://hacku.pocketbay.app/demo.html) · [Review](https://hacku.pocketbay.app/review.html) · [Token workspace](https://hacku.pocketbay.app/token.html)
 
-部署前请对同一时点的 `data.sqlite3`、旧 `token.sqlite3` 及全部 `token-ledgers/*.sqlite3` 使用 SQLite Backup API 一起备份，并在副本上演练恢复与迁移。公开 `data.json` 不包含密码、会话或邀请。/ Before deployment, back up the contribution database, legacy ledger, and every project ledger at the same maintenance point with the SQLite Backup API, then rehearse restoration and migration on copies. Public `data.json` excludes passwords, sessions, and invitations.
+These are the existing deployment URLs. Source changes pushed to GitHub do not by themselves verify that the deployment has been updated.
 
-一个用于记录团队任务贡献、同伴核验与协作关系的本地 Web 应用。项目按 `CORE`（核心）、`SUPPORT`（支持）、`REVIEW`（审查）和 `COORDINATION`（协调）四类贡献计分；待核验或争议中的贡献暂不计分。项目面向 HacKU 2026 原型演示，适合可信团队在本机使用。
+## Features
 
-## 在线访问
+- Record projects, members, tasks, and four contribution types. New contributions are PENDING with score zero.
+- Attach NOTE, URL, IMAGE, or GITHUB_PR evidence references; independently confirm or adjust contributions, raise disputes, and retain resolution history. Preview adjustments before saving.
+- View member scores, shares, task values, contribution details, and a member → contribution → task graph. Dashed edges identify helped members. Filter and sort the list and graph together.
+- Use an English interface. User-entered project names, evidence, and descriptions retain their original text.
+- View persistent project Token balances alongside previous contribution scores. Reconcile reviewed records whose minting failed.
+- Manage mint budgets, direct mints, transfers, commissions, freezes, releases, ledger events, and recovery debt.
+- Register an account, edit a display name, HTTPS avatar URL, and introduction, and access a personal workspace. Self-service project creators become Owners. SMTP configuration is required to send verification emails.
+- Assign project-scoped OWNER, MEMBER, VERIFIER, and VIEWER roles. Invite existing accounts by member ID or verified email; members without accounts can redeem a one-use 48-hour invitation.
+- View a fixed public demo without accessing real project databases. Explore value creation, Token flow, collaboration, and verification/trust graph views.
 
-[PocketBay 上的 HacKU](https://hacku.pocketbay.app) · [注册](https://hacku.pocketbay.app/register.html) · [我的工作区](https://hacku.pocketbay.app/workspace.html) · [公开 Demo](https://hacku.pocketbay.app/demo.html) · [贡献审核](https://hacku.pocketbay.app/review.html) · [Token 工作台](https://hacku.pocketbay.app/token.html)
+Site administrator is a separate operational identity and does not automatically confer project membership. Owners manage project membership and roles; Members contribute and accept commissions; Verifiers review independently; Viewers read. See [fairness rules](FAIRNESS.md).
 
-应用支持按项目分离的 Token SQLite 账本。当前 PocketBay 项目尚未接入托管数据库；重新部署前应备份线上数据并确认运行环境是否保留 `/data`。账号写入由成员会话认证；首次部署可为一个全局站点管理员生成一次性引导账号文件，站点管理员不自动加入任何项目。邀请链接由项目 Owner 创建并自行交给成员。公平规则见 [FAIRNESS.md](FAIRNESS.md)。
+## Start locally
 
-部署压缩包可用 `python3 scripts/package_pocketbay.py /tmp/hacku-pocketbay.zip` 生成。脚本仅打包应用源码、页面及数据快照，并将压缩包中的应用目录命名为 `contribution_graph`，以兼容 PocketBay 当前对带空格目录生成的构建路径。
-
-当前 PocketBay 项目尚未接入托管数据库。更新版本时，使用 `python3 scripts/package_pocketbay.py /tmp/hacku-pocketbay.zip --bootstrap-seed 'Contribution Graph/private/hacku-auth-seed.json'`，确保新容器缺少站点管理员时能恢复现有账号。该私有文件已被 Git 忽略，勿提交或公开；接入持久数据库并验证迁移后可停止随包提供引导文件。
-
-## 功能
-
-- **贡献录入**：在看板中创建或切换项目、添加成员和任务、提交四类贡献；新贡献以「待验证」状态出现，提交后得分为 0。
-- **贡献审核**：独立的审核页面可为贡献添加证据、同伴确认或调整分值、提出及解决争议，并保留完整的核验与争议记录；调整前先预览分数，确认分数实际变化后才提交。
-- **项目看板**：查看团队总分、成员得分及占比、任务价值和贡献明细。
-- **协作关系图**：展示「成员 → 贡献 → 任务」关系，以虚线标出受帮助成员，并与明细、成员和任务筛选联动；支持按类型、状态、得分和成员排序。
-- **中英双语**：页头「设置」可在中文与 English 之间切换，选择保存在当前浏览器。
-- **Token 认定**：启用匹配项目的账本后，看板以持久 Token 余额显示成员认定结果，并保留旧贡献分作对照；漏铸可从工作台补同步。
-- **账本操作**：迁移已核验的历史贡献，管理任务预算、直接铸币、转账、委托合约、冻结与释放、事件记录及待追偿债务。
-- **数据存储**：旧贡献与 Token 账本分别使用 SQLite 文件，默认服务地址为 `http://127.0.0.1:8000`。
-- **账号与工作区**：可公开注册并用成员 ID 登录；已验证邮箱也可登录。工作区显示本人项目和项目角色，自助建项者成为该项目 Owner。邮箱验证邮件需要配置 SMTP 环境变量。
-- **项目角色**：Owner 管理成员和角色；Member 提交贡献及承接委托；Verifier 独立核验和批准；Viewer 只查看。角色仅作用于单个项目，站点管理员是独立的运维身份。
-- **个人资料与邀请**：个人资料支持显示名、头像 HTTPS 链接和简介。Owner 可通过已验证邮箱或成员 ID 邀请已有账号；没有账号的既有项目成员继续使用 48 小时一次性邀请链接。
-- **公开示例**：`/demo.html` 展示固定演示数据，不读取或写入真实项目和账本。
-- **Token 图视图**：Token 工作台提供价值创造、Token 流转、协作、验证与信任四类关系筛选。
-
-## 快速开始
-
-macOS 可双击 `Contribution Graph/启动本地.command` 启动本地演示，浏览器会在服务就绪后自动打开；在弹出的终端按 `Control+C` 停止。此入口使用独立的 `.local-demo/` 数据目录，不会改写仓库中的 SQLite 数据。首次使用前，需按下面步骤创建 `.venv` 并安装依赖。
-
-需要 Python 3。克隆仓库后，在项目目录中执行：
+Run from the application directory with Python 3:
 
 ```sh
-cd 'Contribution Graph'
+cd 'group contribution ledger'
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python import_json.py data.json data.sqlite3
 .venv/bin/python dashboard_server.py
 ```
 
-启动后：
+On Windows, use `.venv\Scripts\python.exe` in place of `.venv/bin/python`. Import only when the database is absent; the importer refuses to overwrite an existing database. The server and CLI share `data.sqlite3`. SQLite runtime files are ignored by Git; `data.json` is the portable snapshot.
 
-- [项目看板](http://127.0.0.1:8000) — 总览、录入、关系图与贡献明细。
-- [贡献审核](http://127.0.0.1:8000/review.html) — 证据、同伴验证与争议处理。
-- [Token 工作台](http://127.0.0.1:8000/token.html) — 余额、预算、委托、事件与补同步。
-- [API 文档](http://127.0.0.1:8000/docs) — 交互式接口说明。
+Open [Dashboard](http://127.0.0.1:8000), [Review](http://127.0.0.1:8000/review.html), [Token workspace](http://127.0.0.1:8000/token.html), or [API documentation](http://127.0.0.1:8000/docs). The server binds to `127.0.0.1:8000` by default. Override `--port`, `--db`, or `--token-db` when needed. Browser assets have no build step.
 
-`import_json.py` 仅用于首次初始化，已有 `data.sqlite3` 时无需再次导入；它不会覆盖已有数据库。SQLite 文件不进入 Git；仓库中的 `data.json` 是可移植的数据快照。服务默认只监听 `127.0.0.1:8000`，可用 `dashboard_server.py --port 端口`、`--db 路径`、`--token-db 路径` 调整。浏览器代码无需构建。
+On macOS, double-click `group contribution ledger/start-local.command` after installing dependencies. It uses isolated `.local-demo/` data and opens the browser after startup. Press Control+C in its terminal to stop.
 
-身份库在应用启动时以增量方式添加。使用 `python3 Contribution\ Graph/manage_auth.py bootstrap-seed --db /绝对路径/data.sqlite3 --member 成员ID --out /tmp/hacku-auth-seed.json` 生成只含 scrypt 哈希的全局管理员引导文件（旧的 `--project` 参数仍可保留），并通过部署包的 `--bootstrap-seed` 选项传入。部署后移除引导文件。密码至少 8 位，并包含英文大写、小写字母和数字；登录使用 HttpOnly 会话 Cookie 和 CSRF 令牌。
-
-新部署必须先按上文配置一次性管理员引导文件。会话使用 HttpOnly Cookie，同源写入附带 CSRF 校验。SMTP 可用 `HACKU_SMTP_HOST`、`HACKU_SMTP_FROM`、可选的 `HACKU_SMTP_PORT`、`HACKU_SMTP_USER` 和 `HACKU_SMTP_PASSWORD` 配置；未配置时注册邮箱仍可用于登录，但邮箱邀请需先完成验证，成员 ID 也可用于登录。
-
-## 推荐使用流程
-
-1. 在看板选择现有项目，或创建项目、成员及带价值的任务。
-2. 提交贡献并添加证据。新贡献为 `PENDING`，当前得分为 0。
-3. 在审核页由另一名成员确认、调整或提出争议；调整前可预览分数。争议解决后保留完整记录。
-4. 在 Token 工作台迁移该项目已核验的历史贡献，或创建空账本。当前工作台操作活动账本；操作前核对项目 ID。后端在贡献审核同步时会把旧单账本复制、校验并登记到对应项目文件。
-5. 查看余额、预算和事件；未同步的已审核贡献可在工作台补同步。争议降分而余额不足时，可在余额恢复后追偿欠额。
-
-Token 迁移会跳过待核验和争议中的贡献；已核验贡献无法完整映射时会失败。历史 `SUPPORT` 贡献在有真实独立审核人时映射为委托合约。详细规则和操作示例见 [应用文档](Contribution%20Graph/README.md)。
-
-## 项目结构
-
-| 路径 | 作用 |
-|---|---|
-| `Contribution Graph/contribution_engine.py` | 数据模型、校验和评分规则 |
-| `Contribution Graph/contribution_store.py` | SQLite 读写、业务流程与命令行 |
-| `Contribution Graph/dashboard_server.py` | FastAPI 接口与静态页面服务 |
-| `Contribution Graph/dashboard/` | 看板、审核页与 Token 工作台的页面代码 |
-| `Contribution Graph/token_engine.py`、`token_store.py` | Token 规则、账本持久化与委托结算 |
-| `Contribution Graph/migrate_token_ledger.py` | 已核验历史贡献的 Token 迁移 |
-| `Contribution Graph/token_projection_demo.py` | 旧分数与 Token 余额的对照脚本 |
-| `Contribution Graph/schema.sql` | 数据库表、外键和索引 |
-| `Contribution Graph/data.json` | 合并后的项目数据快照 |
-| `Contribution Graph/import_json.py`、`export_json.py`、`merge_sqlite.py` | 快照导入、导出与历史数据库合并工具 |
-| `融合指南.md` | 新旧引擎的概念映射、融合陷阱与路线图 |
-
-目前快照含 1 个项目、4 名成员、4 项任务、6 条贡献，以及对应的核验和争议记录。运行时以 `data.sqlite3` 为准；更改数据后，运行 `python3 export_json.py` 更新快照。命令行用法、API 路径和完整流程见 [详细文档](Contribution%20Graph/README.md)，审核页面的实现与验收步骤见 [B-实现说明.md](B-实现说明.md)。
-
-## 贡献与 Token
-
-旧贡献分保留为审核估值；匹配项目的 Token 账本建立后，看板成员卡片显示持久账本余额。审核会尝试铸币或冻结；若写入失败，看板列出待补同步贡献，可在 Token 工作台重试。两份 SQLite 文件不是同一事务，因此补同步状态需要留意。
-
-`data.sqlite3` 存放贡献与审核记录，`token.sqlite3` 存放持久 Token 账本。备份时应同时保存两份数据库，或在 `Contribution Graph/` 运行 `.venv/bin/python export_json.py` 导出包含账本的 JSON 快照。导入含 `token_ledger` 的快照会同时恢复 `token.sqlite3`。运行中的数据可能已与仓库里的示例 `data.json` 不同；更新快照前请确认要发布哪些数据。
-
-写接口使用成员会话、同源 `Origin` 与 CSRF 校验；管理员通过一次性 scrypt seed 初始化，项目管理员可以邀请已加入项目且没有账号的成员。委托需第三方真实批准。已结算争议须先冻结合约付款，再由非当事人管理员释放、退款或拆分。规则与边界见 [FAIRNESS.md](FAIRNESS.md)。
-
-每个项目的 Token 数据仍保存在按完整 SHA-256 项目 ID 命名的独立 SQLite 文件中；备份时同时保存 `data.sqlite3`、旧 `token.sqlite3` 和全部 `token-ledgers/*.sqlite3`，使用 [backup_restore.py](Contribution%20Graph/backup_restore.py) 在副本上演练恢复。两人项目因缺少独立第三人不能结算委托。发布前的真实数据库备份、恢复和浏览器验收须由部署操作者在维护时段执行；本次代码任务不会替代生产演练。
+For the initial global administrator, generate a private scrypt seed for an existing member:
 
 ```sh
-cd 'Contribution Graph'
-.venv/bin/python token_projection_demo.py                # 对照报告（临时库）
-.venv/bin/python token_projection_demo.py --db data.sqlite3
-.venv/bin/python contribution_store.py token-view fintech # 投影 JSON
-.venv/bin/python seed_token_demo.py /tmp/hacku-token-demo # 新建多案例演示库，拒绝覆盖已有数据库
+python3 'group contribution ledger/manage_auth.py' bootstrap-seed --db /absolute/path/data.sqlite3 --member MEMBER_ID --out /tmp/hacku-auth-seed.json
 ```
 
-服务启动后也可读取 `GET /api/projects/{project_id}/token-view`；`GET /api/dashboard` 的成员数据额外带 `balances`。融合的完整映射规则、陷阱与后续路线见 [融合指南.md](融合指南.md)。
+Supply the seed privately during deployment; remove it afterward. Existing accounts are not overwritten. Passwords require at least eight characters, uppercase, lowercase, and a number. Sessions use HttpOnly cookies and same-origin/CSRF checks. SMTP settings are `HACKU_SMTP_HOST`, `HACKU_SMTP_FROM`, and optional `HACKU_SMTP_PORT`, `HACKU_SMTP_USER`, and `HACKU_SMTP_PASSWORD`. Existing email-login behavior follows the server; use the member ID if email verification is unavailable. Email invitations require verified ownership.
 
-## 测试与开发
+## Workflow
 
-在 `Contribution Graph/` 中运行：
+1. Select a project or create one, then add members and tasks with preset values.
+2. Submit a contribution and evidence. Its initial score is zero.
+3. Another qualified member confirms, adjusts, or disputes it. Preview score changes before saving. Resolution retains the full history.
+4. Initialize the selected project's ledger by migrating verified history or creating an empty ledger. Check the project ID first. Migration skips pending/disputed records and fails if verified records cannot be mapped. SUPPORT with real independent review maps to a commission; otherwise verified legacy value is retained through direct minting without invented approval.
+5. Inspect balances, budgets, events, and missing mints. Reconcile if a contribution review succeeded but the ledger write failed. After a downward adjustment, collect recorded debt when the debtor has available balance.
+
+Withdrawal requires a contributor request and an independent active-member decision. Approval sets effective score to zero and retains the original contribution, evidence, and review history. Recovery and outstanding debt are different amounts. Exit affects only one project and retains the global account. Archival hides a project and stops writes while retaining all history and ledgers; it can be restored. See the [lifecycle manual](withdrawal-and-lifecycle-manual.md).
+
+Commissions require actual third-party approval records. For a settled dispute, freeze the original payment before RELEASE, REFUND, or SPLIT by a qualified non-party administrator. Two-member projects cannot independently approve commissions. Debt does not authorize debiting third-party balances.
+
+## Structure
+
+| Path | Purpose |
+|---|---|
+| `group contribution ledger/contribution_engine.py` | Models, validation, legacy scoring |
+| `group contribution ledger/contribution_store.py` | SQLite operations, workflows, CLI, read-only projection |
+| `group contribution ledger/dashboard_server.py` | FastAPI and static assets |
+| `group contribution ledger/dashboard/` | Dashboard, review, Token workspace, accounts, demo |
+| `group contribution ledger/token_engine.py`, `token_store.py` | Token rules, persistence, commission settlement |
+| `group contribution ledger/migrate_token_ledger.py` | Verified legacy contribution migration |
+| `group contribution ledger/token_projection_demo.py` | Previous-score and projected-balance comparison |
+| `group contribution ledger/schema.sql` | Relational constraints and indexes |
+| `group contribution ledger/data.json` | Portable example snapshot |
+| `group contribution ledger/import_json.py`, `export_json.py`, `merge_sqlite.py` | Import, export, historical database merging |
+| `integration-guide.md` | Model mapping, integration pitfalls, roadmap |
+
+The snapshot contains one project, four members, four tasks, six contributions, and review/dispute records. Runtime data may differ. Refresh `data.json` with `python3 export_json.py` only after deciding which data should be published. See the [application guide](group%20contribution%20ledger/README.md) and [review implementation](B-implementation.md).
+
+## Ledgers, backups, and deployment
+
+Each project's ledger uses `token-ledgers/<full SHA-256 of project ID>.sqlite3`. The legacy `token.sqlite3` remains a migration backup; `/api/token/...` aliases refer only to its original project. Review records and Token events span separate SQLite files, so reconciliation is necessary after partial failures. Exact monetary response strings use `*Exact` fields.
+
+Stop writes and back up `data.sqlite3`, legacy `token.sqlite3`, and all project ledgers at the same maintenance point. Use `backup_restore.py` with a fresh output directory to run SQLite Backup API, integrity checks, and restoration rehearsal. Public JSON snapshots exclude authentication credentials, sessions, and invitations; they are not complete account backups. Imported ledger snapshots restore the corresponding ledger files. Protect private backups and seed files.
+
+PocketBay currently has no managed database. Before redeployment, verify `/data` persistence and back up live files. Package source, assets, and snapshot using:
 
 ```sh
+python3 scripts/package_pocketbay.py /tmp/group-contribution-ledger-pocketbay.zip
+python3 scripts/package_pocketbay.py /tmp/group-contribution-ledger-pocketbay.zip --bootstrap-seed 'group contribution ledger/private/hacku-auth-seed.json'
+```
+
+The archive uses `group_contribution_ledger` to avoid deployment build paths containing spaces. Supply the ignored private recovery seed only while required for administrator recovery. Stop bundling it once durable database migration and recovery are verified. Never publish the seed.
+
+## Verification
+
+```sh
+cd 'group contribution ledger'
 .venv/bin/python -m unittest discover -s . -p 'test_*.py'
 .venv/bin/python demo_workflow.py
+.venv/bin/python token_projection_demo.py
+.venv/bin/python contribution_store.py token-view fintech
+.venv/bin/python seed_token_demo.py /tmp/group-contribution-ledger-token-demo
 ```
 
-前者覆盖评分引擎、SQLite 持久化、Dashboard 与审核 API、Token 账本及同步；后者在临时数据库中验证完整贡献流程，不修改网站数据。贡献规范见 [AGENTS.md](AGENTS.md)，历次变更见 [CHANGELOG.md](CHANGELOG.md)。
+Tests cover scoring, persistence, API, authentication, Token synchronization, and lifecycle behavior. Demos use temporary or new files and refuse overwrite. Read-only projection is available at `GET /api/projects/{project_id}/token-view`; Dashboard retains legacy fields and adds `balances`. Browser acceptance and production backup/restoration require separate deployment verification. See [repository guidelines](AGENTS.md), [integration guide](integration-guide.md), and [change log](CHANGELOG.md).

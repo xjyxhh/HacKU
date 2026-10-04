@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#103c3d">
+  <title>group contribution ledger | Project Dashboard</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/i18n.js" defer></script>
+  <script src="/auth.js?v=5" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="shell">
+    <nav class="page-nav" aria-label="Page navigation">
+      <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">GCL</span><span>group contribution ledger</span></div>
+      <p class="sidebar-label">Project workspace</p>
+      <a href="#overview" aria-current="page">Overview</a><a href="#entry">Add records</a><a href="#graph-panel">Graph</a><a href="#contribution-panel">Contributions</a>
+      <div class="sidebar-divider"></div>
+      <a href="/review.html">Contribution Review</a><a href="/token.html">Token Workspace</a><a href="/workspace.html">My Workspace</a><a href="/demo.html">Public Demo</a>
+      <details class="settings"><summary>Settings</summary><div class="settings-menu"></div></details>
+    </nav>
+    <header class="topbar">
+      <div class="top-actions"><label class="project-picker">Current project <select id="project-select" aria-label="Switch project"></select></label><button id="refresh" class="refresh-button" type="button">Refresh <span aria-hidden="true">↗</span></button></div>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <div id="error" class="error" role="alert" hidden></div>
+      <section id="overview" class="intro" aria-labelledby="project-name">
+        <div><p class="kicker">Project overview</p><h1 id="project-name">Loading project…</h1><p class="intro-copy">Explore contribution scores, task values, and team relationships.</p></div>
+        <p class="updated" id="updated" aria-live="polite">Loading data</p>
+      </section>
+
+      <section class="summary" aria-label="Project summary">
+        <div class="summary-primary"><span>Team score</span><strong id="team-score">--</strong><small>Verified and resolved contributions</small></div>
+        <div><span>Project member</span><strong id="member-count">--</strong><small>Contributors</small></div>
+        <div><span>Tasks</span><strong id="task-count">--</strong><small>Preset task value</small></div>
+        <div><span>Contribution records</span><strong id="contribution-count">--</strong><small id="pending-count">Waiting for data</small></div>
+      </section>
+
+      <p id="token-health" class="token-health" role="status" hidden></p>
+      <section id="lifecycle-panel" class="panel lifecycle-panel" aria-labelledby="lifecycle-title" hidden>
+        <div class="section-head"><div><p class="kicker">Project lifecycle</p><h2 id="lifecycle-title">Withdrawals, exits, and archiving</h2><p class="section-note">Contribution history and the ledger are retained. Archives can be restored; data is not physically deleted.</p></div></div>
+        <div id="lifecycle-content" class="lifecycle-content"></div>
+        <p id="lifecycle-message" class="form-message" role="status" aria-live="polite" hidden></p>
+      </section>
+      <aside class="fairness-note" aria-labelledby="fairness-title"><div><h2 id="fairness-title">How the rules protect members</h2><p>Contributions require independent review, and each verified value is minted once. Commission reserves do not charge members; dispute refunds only process frozen original payments.</p></div><a href="/fairness.html">Read full rules and boundaries</a></aside>
+      <div class="overview-grid">
+        <section class="panel members-panel" aria-labelledby="members-title">
+          <div class="section-head"><div><h2 id="members-title">Member contributions</h2><p class="section-note">Select a member to see related contributions</p></div></div>
+          <div id="members" class="members"></div>
+          <p id="members-empty" class="empty" hidden>No members yet.</p>
+        </section>
+        <section class="panel task-panel" aria-labelledby="tasks-title">
+          <div class="section-head"><div><h2 id="tasks-title">Task values</h2><p class="section-note">Select a task to filter contributions</p></div></div>
+          <div id="tasks" class="tasks"></div>
+          <p id="tasks-empty" class="empty" hidden>No tasks yet.</p>
+        </section>
+      </div>
+
+      <section id="entry" class="panel entry-panel" aria-labelledby="entry-title">
+        <div class="section-head"><div><h2 id="entry-title">Add a contribution</h2><p class="section-note">Create a project and task, then submit a contribution. New records appear as pending in the list and graph.</p></div></div>
+        <div class="entry-grid">
+          <form id="project-form" class="entry-form"><h3>1 · Create project</h3><label>Project name<input name="name" autocomplete="off" required placeholder="e.g. FinTech Demo…"></label><label>Project ID<input name="id" autocomplete="off" spellcheck="false" required pattern="[A-Za-z0-9_-]+" placeholder="e.g. fintech-demo…"></label><button type="submit">Create and switch</button></form>
+          <form id="member-form" class="entry-form"><h3>2 · Add member</h3><label>Member name<input name="name" autocomplete="off" required placeholder="e.g. David…"></label><label>Member ID<input name="id" autocomplete="off" spellcheck="false" required pattern="[A-Za-z0-9_-]+" placeholder="e.g. david…"></label><button type="submit">Add member</button></form>
+          <form id="task-form" class="entry-form"><h3>3 · Add task</h3><label>Task name<input name="name" required placeholder="e.g. Deploy app"></label><label>Task ID<input name="id" required pattern="[A-Za-z0-9_-]+" placeholder="e.g. deployment"></label><label>Preset value<input name="task_value" type="number" min="0" step="any" value="20" required></label><label>Task description<textarea name="description" rows="2" placeholder="Optional"></textarea></label><button type="submit">Add task</button></form>
+          <form id="contribution-form" class="entry-form contribution-form"><h3>4 · Submit contribution</h3><div class="form-grid"><label>Signed-in member <small>Submit contributions only as yourself</small><select name="contributor_id" id="contributor-input" required disabled></select></label><label>Related task<select name="task_id" id="task-input" required></select></label><label>Contribution type<select name="type" id="type-input"><option value="CORE">Core</option><option value="SUPPORT" selected>Support</option><option value="REVIEW">Review</option><option value="COORDINATION">Coordination</option></select></label><label>Helped member <small>Optional</small><select name="helped_member_id" id="helped-input"><option value="">None</option></select></label><label id="completion-field">Completion (0–1)<input name="completion" type="number" min="0" max="1" step="0.01" value="1" required></label><label id="support-field">Proposed support value<input name="support_value" type="number" min="0" step="any" value="8" required></label></div><label>Description<textarea name="description" rows="3" required placeholder="e.g. Helped Alice debug deployment"></textarea></label><p class="form-hint">The score stays at 0 until verification. The server calculates it.</p><button type="submit">Submit contribution</button></form>
+        </div>
+        <p id="form-message" class="form-message" role="status" aria-live="polite" hidden></p>
+      </section>
+
+      <section id="invite-panel" class="panel invite-panel" hidden aria-labelledby="invite-title"><h2 id="invite-title">Invite a project member</h2><p class="section-note">Generate a one-time link for someone without an account after they join the project. Share it securely.</p><form id="invite-form"><label>Member ID<input name="member_id" autocomplete="off" required></label><button type="submit">Generate invite link</button></form><div id="invite-result" role="status" hidden></div></section>
+
+      <section id="graph-panel" class="panel graph-panel" aria-labelledby="graph-title">
+        <div class="section-head"><div><h2 id="graph-title">Contribution graph</h2><p class="section-note">Member → contribution → task. Dashed lines point to helped members. Select a contribution for details.</p></div><span id="relationship-count" class="section-count">0 contributions</span></div>
+        <div id="graph-content" class="graph-layout">
+          <div class="graph-canvas"><svg id="graph" viewBox="0 0 760 300" role="group" aria-label="Member, contribution, and task graph"></svg></div>
+          <div id="relationships" class="relationship-list" aria-label="Contribution relationships"></div>
+        </div>
+        <p id="graph-empty" class="empty" hidden>No contributions match the current filters.</p>
+      </section>
+
+      <section id="contribution-panel" class="panel contribution-panel" aria-labelledby="contributions-title">
+        <div class="section-head contribution-head"><div><h2 id="contributions-title">Contributions</h2><p class="section-note">Scores and shares come from project scoring data</p></div><span id="result-count" class="section-count" aria-live="polite">0 records</span></div>
+        <div class="filter-bar" aria-label="Contribution filters and sorting">
+          <label>Related member<select id="member-filter"><option value="ALL">All members</option></select></label>
+          <label>Task<select id="task-filter"><option value="ALL">All tasks</option></select></label>
+          <label>Type<select id="type-filter"><option value="ALL">All types</option><option value="CORE">Core</option><option value="SUPPORT">Support</option><option value="REVIEW">Review</option><option value="COORDINATION">Coordination</option></select></label>
+          <label>Status<select id="status-filter"><option value="ALL">All statuses</option><option value="PENDING">Pending</option><option value="VERIFIED">Verified</option><option value="DISPUTED">Disputed</option><option value="RESOLVED">Resolved</option><option value="WITHDRAWN">Withdrawn</option></select></label>
+          <label>Sort<select id="sort-order"><option value="original">Original order</option><option value="score-desc">Highest score</option><option value="score-asc">Lowest score</option><option value="member">Member name</option></select></label>
+          <button id="clear-filters" class="clear-button" type="button">Clear filters</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">Contributor and description</th><th scope="col">Task</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Token Events</th><th scope="col" class="number">Previous score</th></tr></thead><tbody id="contributions"></tbody></table></div>
+        <p id="contributions-empty" class="empty" hidden>No contributions match these filters. Clear filters to see all records.</p>
+        <section id="detail" class="detail" aria-labelledby="detail-title" hidden><div class="detail-head"><h3 id="detail-title">Contribution details</h3><button id="close-detail" type="button" aria-label="Close contribution details">×</button></div><div id="detail-content"></div></section>
+      </section>
+    </main>
+    <footer><span>group contribution ledger</span><span>Data from the project service</span></footer>
+  </div>
+</body>
+</html>

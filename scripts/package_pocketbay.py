@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_DIR = ROOT / "Contribution Graph"
+APP_DIR = ROOT / "group contribution ledger"
 INCLUDED_SUFFIXES = {".py", ".sql", ".json", ".txt", ".html", ".css", ".js", ".svg", ".md"}
 
 
@@ -20,12 +20,12 @@ def package(destination, bootstrap_seed=None):
                 continue
             if path.name.startswith("test_"):
                 continue
-            archive.write(path, Path("contribution_graph") / path.relative_to(APP_DIR))
+            archive.write(path, Path("group_contribution_ledger") / path.relative_to(APP_DIR))
         if bootstrap_seed:
             seed = Path(bootstrap_seed).resolve()
             if not seed.is_file():
                 raise FileNotFoundError(seed)
-            info = ZipInfo("contribution_graph/private/hacku-auth-seed.json")
+            info = ZipInfo("group_contribution_ledger/private/hacku-auth-seed.json")
             info.compress_type = ZIP_DEFLATED
             info.external_attr = 0o600 << 16
             archive.writestr(info, seed.read_bytes())

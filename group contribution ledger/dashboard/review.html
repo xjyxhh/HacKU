@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#103c3d">
+  <title>group contribution ledger · Contribution Review</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/review.css">
+  <script src="/i18n.js" defer></script>
+  <script src="/auth.js?v=5" defer></script>
+  <script src="/review.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <div class="shell">
+    <nav class="page-nav" aria-label="Page navigation">
+      <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">GCL</span><span>group contribution ledger</span></div><p class="sidebar-label">Review workspace</p>
+      <a href="/">Project Dashboard</a><a href="#queue-title" aria-current="page">Contribution Review</a><a href="/token.html">Token Workspace</a><a href="/workspace.html">My Workspace</a><a href="/demo.html">Public Demo</a>
+      <div class="sidebar-divider"></div><details class="settings"><summary>Settings</summary><div class="settings-menu"></div></details>
+    </nav>
+    <header class="topbar">
+      <div class="top-actions"><label>Current project <select id="review-project" aria-label="Switch Review Project"></select></label><button id="refresh" type="button">Refresh Data ↗</button></div>
+    </header>
+    <main id="main-content" tabindex="-1">
+      <section class="intro">
+        <div><p class="kicker">Evidence / Peer Review / Disputes</p><h1>Contribution Review</h1><p class="intro-copy" id="project-name">Loading Project…</p></div>
+        <div class="actor-box"><label for="actor">Acting Member</label><select id="actor" disabled></select><small>Identity comes from the signed-in session</small></div>
+      </section>
+      <aside class="fairness-note"><div><h2>Review and dispute rules</h2><p>Reviewers cannot verify their own contributions. Related scores are paused during disputes, which are resolved by a non-party.</p></div><a href="/fairness.html">Read rules and boundaries</a></aside>
+      <div id="error" class="error" role="alert" hidden></div>
+      <div id="success" class="notice" role="status" aria-live="polite" hidden></div>
+      <section class="summary" aria-label="Review Summary">
+        <div><span>Team score</span><strong id="team-score">—</strong><small>Verified and Resolved Contributions</small></div>
+        <div><span>Pending</span><strong id="pending-count">—</strong><small>Scores Count After Confirmation or Adjustment</small></div>
+        <div><span>Disputed</span><strong id="disputed-count">—</strong><small>Scoring Paused Until Resolution</small></div>
+        <div><span>Contribution records</span><strong id="contribution-count">—</strong><small id="updated">Waiting for data</small></div>
+      </section>
+      <div class="review-grid">
+        <section class="panel queue-panel" aria-labelledby="queue-title">
+          <div class="section-head"><h2 id="queue-title">Contribution Queue</h2><label class="filter">Status<select id="status-filter"><option value="ALL">All</option><option value="PENDING">Pending</option><option value="VERIFIED">Verified</option><option value="DISPUTED">Disputed</option><option value="RESOLVED">Resolved</option><option value="WITHDRAWN">Withdrawn</option></select></label></div>
+          <div id="contribution-list" class="queue"></div>
+          <p id="queue-empty" class="empty" hidden>No Matching Contributions.</p>
+        </section>
+        <section class="panel detail-panel" aria-labelledby="detail-title" aria-busy="false">
+          <h2 id="detail-title">Contribution details</h2>
+          <p id="detail-empty" class="empty">Select a Contribution to View Details.</p>
+          <div id="detail-content" hidden>
+            <div class="detail-heading"><strong id="contribution-id"></strong><span id="contribution-status" class="status"></span></div>
+            <p id="description" class="detail-description"></p>
+            <dl id="contribution-meta" class="meta"></dl>
+            <p id="score-explanation" class="hint"></p>
+            <section class="detail-section" aria-labelledby="evidence-title">
+              <h3 id="evidence-title">Evidence</h3><ul id="evidence-list" class="records"></ul>
+              <form id="evidence-form">
+                <div class="form-grid"><label>Evidence Type<select id="evidence-kind" name="evidence_kind"><option value="NOTE">Written Note</option><option value="URL">Web Link</option><option value="IMAGE">Image Link</option><option value="GITHUB_PR">GitHub PR Link</option></select></label><label class="wide">Description or Link<textarea id="evidence-reference" name="evidence_reference" autocomplete="off" required rows="2" maxlength="4000" placeholder="e.g. Work Note or https://example.com/…"></textarea></label></div>
+                <p class="hint">Images and PRs Are Saved as Links.</p><button id="add-evidence" class="secondary" type="submit">Add Evidence</button>
+              </form>
+            </section>
+            <section class="detail-section" aria-labelledby="review-title">
+              <h3 id="review-title">Review Actions</h3><p id="action-hint" class="hint"></p>
+              <form id="score-form">
+                <div class="form-grid">
+                  <label id="completion-label">Completion (0–1)<input id="completion" name="completion" type="number" min="0" max="1" step="0.01" required></label>
+                  <label id="support-label">Support Value<input id="support-value" name="support_value" type="number" min="0" step="any" required></label>
+                  <label>Quality Factor (0.9–1.1)<input id="quality" name="quality" type="number" min="0.9" max="1.1" step="0.01" required></label>
+                </div>
+                <div class="preview-row"><button id="preview" class="secondary" type="submit">Preview Score</button><span id="preview-result" aria-live="polite">Preview the Score Before Submitting Changes.</span></div>
+              </form>
+              <label class="note-label">Review Note / Dispute Reason / Resolution<textarea id="review-note" rows="3" maxlength="4000" placeholder="Required for Disputes and Resolutions…"></textarea></label>
+              <div class="action-buttons"><button id="confirm" type="button">Confirm Contribution</button><button id="adjust" type="button">Submit Adjustment</button><button id="dispute" class="danger" type="button">Raise Dispute</button><button id="resolve" type="button">Resolve Dispute</button></div>
+            </section>
+            <section class="detail-section" aria-labelledby="history-title"><h3 id="history-title">Review History</h3><ul id="verification-list" class="records"></ul><h3>Dispute History</h3><ul id="dispute-list" class="records"></ul></section>
+          </div>
+        </section>
+      </div>
+    </main>
+    <footer>group contribution ledger · Peer Review<span>Review Results Are Saved to the Dashboard Data File</span></footer>
+  </div>
+</body>
+</html>

@@ -1,35 +1,33 @@
-# 公平规则与适用边界
+# Fairness rules and boundaries
 
-## 撤回与退出
+## Withdrawal and exit
 
-撤回必须由贡献者提出，并由另一位活跃项目成员决定。已批准撤回的有效分数为零，但原记录及审核历史不会删除。成员退出只影响单个项目，不删除全局账号；尚未追回的 Token 记为具名债务，不能从第三方余额强制扣除。退出前会阻止未解决争议、未结算合约、冻结 Token 和唯一管理员退出。项目归档可恢复，不能当作物理删除。Token 工作台按当前项目读取独立账本；生产备份与恢复仍需在部署环境演练。
+Withdrawal must be requested by the contributor and decided by another active project member. An approved withdrawal has zero effective score, while its record and review history remain. Exit applies to one project and does not delete the global account. Unrecovered Tokens remain named debt; third-party balances cannot be forcibly debited. Unresolved disputes, unsettled contracts, frozen Tokens, and a sole administrator block exit. Archival is reversible. The Token workspace reads an independent ledger for the selected project. Production backup and restoration require a deployment rehearsal.
 
-Withdrawal must be requested by the contributor and decided by another active project member. An approved withdrawal has zero effective score, while its record and review history remain. Exit applies to one project and does not delete the global account. Unrecovered Tokens remain named debt; third-party balances cannot be forcibly debited. Unresolved disputes, unsettled contracts, frozen Tokens, and a sole administrator block exit. Archival is reversible. The Token workbench reads an independent ledger for the selected project. Production backup and restoration still need a deployment rehearsal.
+## How contributions enter the ledger
 
-## 贡献如何进入账本
+Members submit contributions and evidence for independent review by another qualified project member. Only verified value can be minted. Each contribution's evidence can be recorded once, and each task's total minting cannot exceed its administrator-set cap. Reviewers cannot verify their own contributions. A dispute pauses related scores and identifiable Token payments until an authorized non-party administrator decides the outcome.
 
-成员提交贡献和证据后，由另一位项目成员独立审核。只有已核验的贡献价值可以铸币，同一贡献证据只能入账一次，且每个任务的累计铸币不得超过管理员设置的上限。审核者不能核验自己的贡献。发生争议时，相关分值和可识别的 Token 付款会暂停处理，结论由有权限且非争议当事人的管理员作出。
+## How commissions settle
 
-## 委托如何结算
+A commission reserves task minting capacity without charging the principal. After delivery and independent approval, the system mints verified value and pays the contract price. A final dispute can release payment to the contractor, refund the principal in full, or split it by explicit amounts. Refunds and splits process the original frozen payment; they neither mint again nor restore used task capacity. Cancelling an unsettled contract releases its reserve without creating a payment refund.
 
-委托预留任务铸币额度，但预留本身不会扣除委托人的 Token。交付并经独立成员批准后，系统按验证价值铸币，再按合约价格付款。争议终局可以释放付款给承接人、全额退还委托人，或按明确金额拆分。退款和拆分只处理已冻结的原付款，不再次铸币，也不会恢复已用任务额度。未结算合约取消只释放预留额度，不会生成金额退款。
+## Benefits and costs
 
-## 谁受益，谁承担成本
+Contributors receive Tokens for verifiable work. Principals can retain the difference between result value and payment price; contractors receive their negotiated payment. Independent review protects the parties from unilateral confirmation but creates waiting time and review work. Administrators maintain task caps, evidence, and the ledger.
 
-贡献者可因可核验的工作取得 Token；委托人可以把任务交由承接人完成，并保留任务价值与付款价格之间的差额；承接人取得协商好的付款。独立审核和争议处理保护贡献者、委托人及承接人免受单方确认，但会增加等待时间，也要求成员投入审核与说明争议的时间。管理员需要维护任务上限、证据与账本。
+## Limits
 
-## 规则的失效边界
+- A two-member project needs a third independent reviewer to approve a commission.
+- If the contractor has transferred payment away, the ledger may be unable to freeze the full amount. Resolution is rejected with the shortfall; other members' balances are not automatically debited.
+- Freezes cover identifiable related ledger payments and cannot recover off-ledger assets.
+- Task caps, reviewer judgment, and team practice determine contribution units. Token amounts do not automatically represent market price, hours worked, or fair wages.
+- Pausing controlled scores and balances does not resolve underlying trust, communication, or governance problems.
 
-- 只有两名成员的项目无法做到由第三名成员独立批准彼此的委托。系统应阻止结算，团队需要增加独立审核成员。
-- 如果承接人已转出付款，系统可能无法冻结足额余额。此时结案会被拒绝并显示欠额；本版不会自动冲销其他成员余额。
-- 余额冻结只覆盖账本中可识别的关联付款，不代表链外资产或已离开账本的价值可以追回。
-- 贡献价值单位由任务上限、审核判断与团队实践共同决定，可能随时间漂移；Token 数量不能自动代表市场价格、工作时长或公平工资。
-- 争议暂停的是系统可控制的分值和余额，不消除成员之间的信任、沟通与治理问题。
+## Accounts and roles
 
-## 账号与项目角色
+An account represents a global member ID. Roles are project-scoped: Owner configures membership, Member contributes and accepts commissions, Verifier reviews and approves independently, and Viewer reads. Roles do not make projects private; existing public dashboards remain readable. Site administrator is an operational role and does not automatically create project membership.
 
-账号代表一个全局成员 ID；项目角色按项目分别记录。Owner 可以配置项目成员，Member 可以提交贡献和承接委托，Verifier 可以独立核验及批准，Viewer 只读。角色不会自动使项目私有，既有公开看板仍按原规则可读。站点管理员用于运维，不因该身份自动加入项目。
+An unverified email does not prove ownership and cannot authorize email invitations. Without SMTP, member-ID login remains available. Inviting an existing account does not reset its password. Existing members without accounts bind their original member ID through a one-use invitation.
 
-邮箱在验证前不证明归属，因此未验证邮箱不可用于登录或邀请。SMTP 未配置时可使用成员 ID 登录，邮箱验证与邮箱邀请暂不可用。Owner 邀请已有账号不会重置密码；尚未开通账号的既有成员继续通过一次性邀请绑定原成员 ID。
-
-委托链条为委托人提出、承接人接受并提交交付证据、独立 Owner/Verifier 核验、项目 Owner/Verifier 按数据库真实批准结算。委托人或承接人不能批准自己的合同。双人项目必须增加第三方审核者；站点运维身份本身不能替代项目成员身份完成独立批准。
+The principal offers a commission, the contractor accepts and supplies delivery evidence, and an independent Owner/Verifier verifies and approves it. Settlement uses actual database approval records. Neither principal nor contractor may approve their own contract; site administration alone does not replace project membership or independent approval.
